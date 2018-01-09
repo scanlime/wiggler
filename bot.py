@@ -24,13 +24,12 @@ class Motors:
     def off(self):
         self.set((0,0,0))
 
-    def random(self, pwm_level=0.25):
-        dir_choice = random.randrange(0, 3)
-        mot = [0,0,0]
-        mot[dir_choice] = pwm_level
+    def random(self, pwm_level=0.3):
+                d = random.randint(0, 2)
+        mot = [ pwm_level * (d == i) for i in range(3) ]
         self.set(mot)
 
-    def accelerate(self, rate=1.1):
+    def accelerate(self, rate=1.6):
         self.set([min(1.0, s * rate) for s in self.speeds])
 
 
@@ -89,8 +88,6 @@ class GreatArtist:
         self.pen_position = None
         self.counter = 0
         self.eye_feedback = 0
-        self.eye_lag = eye_lag
-        self.eye_buffer = [None] * self.eye_lag
         self.pen_velocity = None
 
     def update(self, tablet_rx):
@@ -99,16 +96,9 @@ class GreatArtist:
             self.draw.line(self.pen_position + next_pos, fill=255, width=1)
             self.pen_velocity = (next_pos[0] - self.pen_position[0], next_pos[1] - self.pen_position[1])
 
-        sub = ImageMath.eval("convert(128+(a-b/2)/2, 'L')", dict(a=self.inspiration, b=self.progress))
+        sub = ImageMath.eval("convert(a-b*2/3, 'L')", dict(a=self.inspiration, b=self.progress))
         coarse = sub.filter(self.coarse_kernel).filter(self.coarse_kernel)
         self.eye = ImageMath.eval("convert((a+b)/2, 'L')", dict(a=sub, b=coarse)).filter(self.fine_kernel)
-
-        lag_index = self.counter % self.eye_lag
-        if self.counter > self.eye_lag:
-            self.lagged_eye = self.eye_buffer[lag_index]
-        else:
-            self.lagged_eye = self.eye_buffer[0]
-        self.eye_buffer[lag_index] = self.eye
 
         self.eye.save("out/eye-%06d.png" % self.counter)
         self.progress.save("out/prog-%06d.png" % self.counter)
@@ -116,6 +106,7 @@ class GreatArtist:
         self.pen_position = next_pos
 
     def should_change_direction(self, threshold=0.4):
+
         if not self.pen_velocity:
             return False
 
@@ -136,21 +127,27 @@ class GreatArtist:
         rays.sort()
         return rays
 
-    def evaluate_ray(self, vec, weight_step=0.5):
+    def evaluate_ray(self, vec, step_length=1.5,  weight_step=0.7, edge_penalty=-5.0):
         """Score a ray starting at the current location, with the given per-frame velocity"""
 
         pos = self.pen_position
         total = 0
         weight = 1.0
 
-        src = self.lagged_eye
+                vec_len = math.sqrt(math.pow(vec[0], 2) + math.pow(vec[1], 2))
+                if vec_len <= 0:
+                    return 0
+                step_vec = (vec[0] * step_length / vec_len, vec[1] * step_length / vec_len)
+
+        src = self.eye
         (width, height) = src.size
 
         while weight > 0.001:
-            pos = (pos[0] + vec[0], pos[1] + vec[1])
+            pos = (pos[0] + step_vec[0], pos[1] + step_vec[1])
             if pos[0] < 0 or pos[0] > width-1 or pos[1] < 0 or pos[1] > height-1:
-                break
-            total += self.lagged_eye.getpixel(pos) * weight
+                            total += edge_penalty * weight
+                        else:
+                total += src.getpixel(pos) * weight
             weight = weight * weight_step
 
         return total
@@ -167,6 +164,7 @@ a = GreatArtist("images/rng2.png")
 
 try:
     while True:
+                time.sleep(0.1)
         print("Frame %d" % a.counter)
         rx.poll()
         a.update(rx)
