@@ -25,7 +25,7 @@ class Motors:
         self.set((0,0,0))
 
     def random(self, pwm_level=0.3):
-                d = random.randint(0, 2)
+        d = random.randint(0, 2)
         mot = [ pwm_level * (d == i) for i in range(3) ]
         self.set(mot)
 
@@ -134,10 +134,10 @@ class GreatArtist:
         total = 0
         weight = 1.0
 
-                vec_len = math.sqrt(math.pow(vec[0], 2) + math.pow(vec[1], 2))
-                if vec_len <= 0:
-                    return 0
-                step_vec = (vec[0] * step_length / vec_len, vec[1] * step_length / vec_len)
+        vec_len = math.sqrt(math.pow(vec[0], 2) + math.pow(vec[1], 2))
+        if vec_len <= 0:
+            return 0
+        step_vec = (vec[0] * step_length / vec_len, vec[1] * step_length / vec_len)
 
         src = self.eye
         (width, height) = src.size
@@ -145,8 +145,8 @@ class GreatArtist:
         while weight > 0.001:
             pos = (pos[0] + step_vec[0], pos[1] + step_vec[1])
             if pos[0] < 0 or pos[0] > width-1 or pos[1] < 0 or pos[1] > height-1:
-                            total += edge_penalty * weight
-                        else:
+                total += edge_penalty * weight
+            else:
                 total += src.getpixel(pos) * weight
             weight = weight * weight_step
 
@@ -164,7 +164,7 @@ a = GreatArtist("images/rng2.png")
 
 try:
     while True:
-                time.sleep(0.1)
+        time.sleep(0.1)
         print("Frame %d" % a.counter)
         rx.poll()
         a.update(rx)
