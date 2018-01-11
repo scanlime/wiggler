@@ -78,8 +78,8 @@ class WiggleMode:
 
 
 class WiggleBot:
-    pwm_initial = 0.5
-    pwm_acceleration = 1.2
+    pwm_initial = 0.6
+    pwm_acceleration = 1.1
 
     def __init__(self):
         self.pi = pigpio.pi()
@@ -156,12 +156,16 @@ class GreatArtist:
             self.bot.frame_counter, self.output_frame_count,
             self.bot.current_mode, self.mode_scores))
 
-    def choose_mode(self):
+    def choose_mode(self, reevaluation_interval=80):
         scores = list(map(self.evaluate_vibration_mode, range(len(self.bot.vibration_modes))))
         self.mode_scores = scores
+
         best_mode = 0
         for mode, score in enumerate(scores):
-            if score > scores[best_mode]:
+            last_frame_counter = self.bot.vibration_modes[mode].last_frame_counter
+            if (score > scores[best_mode] or
+                not last_frame_counter or
+                (self.bot.frame_counter - last_frame_counter >= reevaluation_interval)):
                 best_mode = mode
         return best_mode
 
@@ -174,10 +178,10 @@ class GreatArtist:
 
         s = max(*self.inspiration.size)
         draw = ImageDraw.Draw(self.progress)
-        draw.line((s*from_pos[0], s*from_pos[1], s*to_pos[0], s*to_pos[1]), fill=255, width=1)
+        draw.line((s*from_pos[0], s*from_pos[1], s*to_pos[0], s*to_pos[1]), fill=255, width=2)
 
-    def update_goal(self):
-        sub = ImageMath.eval("convert(32+a-b, 'L')", dict(a=self.inspiration, b=self.progress))
+    def update_goal(self, feedback_bias=1):
+        sub = ImageMath.eval("convert(%d+a-b, 'L')" % feedback_bias, dict(a=self.inspiration, b=self.progress))
         long_distance_blur = sub.filter(self.large_blur).filter(self.large_blur)
         self.goal = ImageMath.eval("convert(a+b, 'L')", dict(a=sub, b=long_distance_blur))
 
@@ -226,19 +230,19 @@ class GreatArtist:
         scaled = (pos[0] * to_pixels, pos[1] * to_pixels)
         return self._sample_goal_bilinear(scaled, border=edge_penalty)
 
-    def evaluate_ray(self, vec, weight_step=0.5, weight_min=1e-4, error_score=1e3):
+    def evaluate_ray(self, vec, weight_step=0.75, weight_min=0.01, error_score=1e3):
         """Score a ray starting at the current location, with the given per-frame velocity"""
 
         pos = self.bot.position
         total = 0
         weight = 1.0
+        step_length = 2.0 / min(*self.goal.size)
 
         if not vec:
             return error_score
         vec_len = math.sqrt(math.pow(vec[0], 2) + math.pow(vec[1], 2))
         if vec_len <= 0:
             return error_score
-        step_length = 1.0 / min(*self.goal.size)
         step_vec = (vec[0] * step_length / vec_len, vec[1] * step_length / vec_len)
 
         while weight > weight_min:
@@ -248,11 +252,21 @@ class GreatArtist:
 
         return total
 
-    def evaluate_vibration_mode(self, index, age_modifier=1e-2):
+    def evaluate_ray_bundle(self, vec):
+        if not vec:
+            return self.evaluate_ray(vec)
+        total = 0
+        for i in range(-2,3):
+            angle = i * (math.pi / 180.0 * 5.0)
+            s = math.sin(angle)
+            c = math.cos(angle)
+            rotated = (vec[0]*c - vec[1]*s, vec[0]*s + vec[1]*c)
+            total += self.evaluate_ray(rotated)
+        return total
+
+    def evaluate_vibration_mode(self, index):
         mode = self.bot.vibration_modes[index]
-        age = self.bot.frame_counter - (mode.last_frame_counter or -1e5)
-        score = self.evaluate_ray(mode.velocity)
-        return score + age_modifier * age
+        return self.evaluate_ray_bundle(mode.velocity)
 
 
 def main():
