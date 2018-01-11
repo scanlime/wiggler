@@ -128,7 +128,7 @@ class GreatArtist:
         self.step_timestamp = None
         self.large_blur = ImageFilter.GaussianBlur(max(*self.inspiration.size)/3)
 
-    def step(self, goal_update_rate=40, min_step_duration=1/15, mode_change_delay=1/5):
+    def step(self, goal_update_rate=40, min_step_duration=1/10, mode_change_delay=1/6):
         prev_position = self.bot.position
         self.bot.update()
         self.record_bot_travel(prev_position, self.bot.position)
