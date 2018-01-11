@@ -172,7 +172,7 @@ class GreatArtist:
             self.bot.frame_counter, self.output_frame_count,
             self.bot.motors.speeds, self.mode_scores))
 
-    def choose_mode(self, reevaluation_interval=2.5, min_speed=6e-5):
+    def choose_mode(self, reevaluation_interval=2.5, min_speed=2e-4):
         scores = list(map(self.evaluate_vibration_mode, range(len(self.bot.vibration_modes))))
         self.mode_scores = scores
         best_mode = 0
