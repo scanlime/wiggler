@@ -79,7 +79,7 @@ class WiggleMode:
 
 class WiggleBot:
     pwm_initial = 0.5
-    pwm_acceleration = 1.02
+    pwm_acceleration = 1.2
 
     def __init__(self):
         self.pi = pigpio.pi()
@@ -126,7 +126,7 @@ class GreatArtist:
         self.goal = None
         self.mode_scores = None
         self.step_timestamp = None
-        self.large_blur = ImageFilter.GaussianBlur(96)
+        self.large_blur = ImageFilter.GaussianBlur(max(*self.inspiration.size)/3)
 
     def step(self, goal_update_rate=40, min_step_duration=1/15, mode_change_delay=1/5):
         prev_position = self.bot.position
@@ -152,7 +152,9 @@ class GreatArtist:
                 time.sleep(delay_needed)
         self.step_timestamp = ts
 
-        print("frame %06d, output %06d" % (self.bot.frame_counter, self.output_frame_count))
+        print("frame %06d, output %06d, mode=%r, scores=%r" % (
+            self.bot.frame_counter, self.output_frame_count,
+            self.bot.current_mode, self.mode_scores))
 
     def choose_mode(self):
         scores = list(map(self.evaluate_vibration_mode, range(len(self.bot.vibration_modes))))
@@ -175,7 +177,7 @@ class GreatArtist:
         draw.line((s*from_pos[0], s*from_pos[1], s*to_pos[0], s*to_pos[1]), fill=255, width=1)
 
     def update_goal(self):
-        sub = ImageMath.eval("convert(a-b, 'L')", dict(a=self.inspiration, b=self.progress))
+        sub = ImageMath.eval("convert(32+a-b, 'L')", dict(a=self.inspiration, b=self.progress))
         long_distance_blur = sub.filter(self.large_blur).filter(self.large_blur)
         self.goal = ImageMath.eval("convert(a+b, 'L')", dict(a=sub, b=long_distance_blur))
 
@@ -246,9 +248,9 @@ class GreatArtist:
 
         return total
 
-    def evaluate_vibration_mode(self, index, age_modifier=0.1):
+    def evaluate_vibration_mode(self, index, age_modifier=1e-2):
         mode = self.bot.vibration_modes[index]
-        age = self.bot.frame_counter - (mode.last_frame_counter or -1000)
+        age = self.bot.frame_counter - (mode.last_frame_counter or -1e5)
         score = self.evaluate_ray(mode.velocity)
         return score + age_modifier * age
 
