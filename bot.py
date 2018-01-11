@@ -5,36 +5,36 @@ import time, random, math
 import pigpio
 import evdev
 from evdev import ecodes
-import Adafruit_PCA9685
 from PIL import Image, ImageDraw, ImageFilter, ImageMath, ImageOps
 
 
 class Motors:
-    def __init__(self, hz=15000):
+    def __init__(self, pi, hz=8000):
+        self.pi = pi
         self.hz = hz
-        self.pwm = Adafruit_PCA9685.PCA9685()
-        self.pwm.set_pwm_freq(self.hz)
+        self.pins = (23, 24, 25)
 
     def set(self, speeds):
         self.speeds = tuple(speeds)
-        for i in range(3):
-            self.pwm.set_pwm(i, 0, max(0, min(4095, int(4095 * speeds[i]))))
+        for speed, pin in zip(self.speeds, self.pins):
+            self.pi.set_PWM_frequency(pin, self.hz)
+            self.pi.set_PWM_dutycycle(pin, max(0, min(255, int(255 * speed))))
 
     def off(self):
         self.set((0,0,0))
 
-    def random(self, pwm_level=0.3):
+    def random(self, pwm_level=0.8):
         d = random.randint(0, 2)
         mot = [ pwm_level * (d == i) for i in range(3) ]
         self.set(mot)
 
-    def accelerate(self, rate=1.6):
+    def accelerate(self, rate=1.01):
         self.set([min(1.0, s * rate) for s in self.speeds])
 
 
 class TabletTx:
-    def __init__(self):
-        self.pi = pigpio.pi()
+    def __init__(self, pi):
+        self.pi = pi
         self.set_idle()
 
     def set_idle(self):
@@ -104,7 +104,7 @@ class GreatArtist:
         self.counter = self.counter + 1
         self.pen_position = next_pos
 
-    def should_change_direction(self, threshold=0.4):
+    def should_change_direction(self, threshold=0.6):
 
         if not self.pen_velocity:
             return False
@@ -126,7 +126,7 @@ class GreatArtist:
         rays.sort()
         return rays
 
-    def evaluate_ray(self, vec, step_length=1.5,  weight_step=0.7, edge_penalty=-5.0):
+    def evaluate_ray(self, vec, step_length=1.5,  weight_step=0.2, edge_penalty=-5.0):
         """Score a ray starting at the current location, with the given per-frame velocity"""
 
         pos = self.pen_position
@@ -152,25 +152,30 @@ class GreatArtist:
         return total
 
 
-tx = TabletTx()
-rx = TabletRx()
-mot = Motors()
+def main():
+    pi = pigpio.pi()
+    tx = TabletTx(pi)
+    rx = TabletRx()
+    mot = Motors(pi)
 
-tx.set_idle()
-mot.random()
+    tx.set_idle()
+    mot.random()
 
-a = GreatArtist("images/rng2.png")
+    a = GreatArtist("images/rng2.png")
 
-try:
-    while True:
-        time.sleep(0.1)
-        print("Frame %d" % a.counter)
-        rx.poll()
-        a.update(rx)
-        if a.should_change_direction():
-            mot.random()
-            print("change direction")
-        else:
-            mot.accelerate()
-finally:
-    mot.off()
+    try:
+        while True:
+            print("Frame %d" % a.counter)
+            rx.poll()
+            a.update(rx)
+            if a.should_change_direction():
+                mot.random()
+                print("change direction")
+            else:
+                mot.accelerate()
+    finally:
+        mot.off()
+
+if __name__ == "__main__":
+    main()
+
