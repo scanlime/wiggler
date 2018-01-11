@@ -231,29 +231,16 @@ class GreatArtist:
         self.output_frame_count += 1
         self.goal_timestamp = time.time()
 
-    def _sample_goal_int(self, pos, border):
-        if pos[0] < 0 or pos[0] > self.goal.size[0]-1 or pos[1] < 0 or pos[1] > self.goal.size[1]-1:
+    def sample_goal(self, pos, border=0):
+        size = self.goal.size
+        to_pixels = max(*size)
+        ipos = (int(pos[0] * to_pixels), int(pos[1] * to_pixels))
+        if ipos[0] < 0 or ipos[0] > size[0]-1 or ipos[1] < 0 or ipos[1] > size[1]-1:
             return border
-        self.sample_list.append(pos)
-        return self.goal.getpixel(pos)
+        self.sample_list.append(ipos)
+        return self.goal.getpixel(ipos)
 
-    def _sample_goal_bilinear(self, pos, border):
-        ipos = (int(pos[0]), int(pos[1]))
-        fpos = (pos[0] - ipos[0], pos[1] - ipos[1])
-        s00 = self._sample_goal_int((ipos[0]  , ipos[1]  ), border)
-        s10 = self._sample_goal_int((ipos[0]+1, ipos[1]  ), border)
-        s01 = self._sample_goal_int((ipos[0]  , ipos[1]+1), border)
-        s11 = self._sample_goal_int((ipos[0]+1, ipos[1]+1), border)
-        sx0 = fpos[0] * s10 + (1.0 - fpos[0]) * s00
-        sx1 = fpos[0] * s11 + (1.0 - fpos[0]) * s01
-        return fpos[1] * sx0 + (1.0 - fpos[1]) * sx1
-
-    def sample_goal(self, pos):
-        to_pixels = max(*self.goal.size)
-        scaled = (pos[0] * to_pixels, pos[1] * to_pixels)
-        return self._sample_goal_bilinear(scaled, border=0)
-
-    def evaluate_ray(self, vec, weight_multiple=0.5, length_multiple=1.1, num_samples=40):
+    def evaluate_ray(self, vec, weight_multiple=0.5, length_multiple=1.2, num_samples=20):
         """Score a ray starting at the current location, with the given per-frame velocity"""
 
         pos = self.bot.position
@@ -276,15 +263,20 @@ class GreatArtist:
 
         return total
 
+    def evaluate_rotated_ray(self, vec, degree_offset):
+        angle = degree_offset * math.pi / 180.0
+        s, c = (math.sin(angle), math.cos(angle))
+        rotated = (vec[0]*c - vec[1]*s, vec[0]*s + vec[1]*c)
+        return self.evaluate_ray(rotated)
+
     def evaluate_ray_bundle(self, vec):
-        total = 0
         if not vec:
             return 0
-        for angle in (-0.6, -0.2, 0.0, 0.2, 0.6):
-            s, c = (math.sin(angle), math.cos(angle))
-            rotated = (vec[0]*c - vec[1]*s, vec[0]*s + vec[1]*c)
-            total += self.evaluate_ray(rotated)
-        return total
+        return (self.evaluate_ray(vec) +
+                self.evaluate_rotated_ray(vec, -1) * 0.3 +
+                self.evaluate_rotated_ray(vec, 1) * 0.3 +
+                self.evaluate_rotated_ray(vec, -30) * 0.1 +
+                self.evaluate_rotated_ray(vec, 30) * 0.1)               
 
     def evaluate_vibration_mode(self, index):
         mode = self.bot.vibration_modes[index]
