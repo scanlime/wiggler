@@ -118,16 +118,17 @@ class WiggleBot:
 class GreatArtist:
     def __init__(self, bot, inspiration):
         self.bot = bot
+        self.output_frame_count = 0
         self.font = ImageFont.truetype('DroidSansMono.ttf', 10)
         self.inspiration = ImageOps.invert(Image.open(inspiration).convert('L'))
         self.progress = Image.new('L', self.inspiration.size, 0)
         self.debugview = Image.new('L', self.inspiration.size, 0)
         self.goal = None
         self.mode_scores = None
-        self.coarse_kernel = ImageFilter.GaussianBlur(96)
-        self.fine_kernel = ImageFilter.GaussianBlur(2)
+        self.step_timestamp = None
+        self.large_blur = ImageFilter.GaussianBlur(96)
 
-    def step(self):
+    def step(self, goal_update_rate=45, min_step_duration=0.02):
         prev_position = self.bot.position
         self.bot.update()
         self.record_bot_travel(prev_position, self.bot.position)
@@ -139,9 +140,17 @@ class GreatArtist:
             else:
                 self.bot.change_mode(next_mode)
 
-        self.update_goal()
+        if 0 == (self.bot.frame_counter % goal_update_rate):
+            self.update_goal()
 
-        print("frame %06d" % self.bot.frame_counter)
+        ts = time.time()
+        if self.step_timestamp:
+            delay_needed = min_step_duration - (ts - self.step_timestamp)
+            if delay_needed > 0.001:
+                time.sleep(delay_needed)
+        self.step_timestamp = ts
+
+        print("frame %06d, output %06d" % (self.bot.frame_counter, self.output_frame_count))
 
     def choose_mode(self):
         scores = list(map(self.evaluate_vibration_mode, range(len(self.bot.vibration_modes))))
@@ -165,8 +174,7 @@ class GreatArtist:
 
     def update_goal(self):
         sub = ImageMath.eval("convert(a-b, 'L')", dict(a=self.inspiration, b=self.progress))
-        coarse = sub.filter(self.coarse_kernel).filter(self.coarse_kernel)
-        self.goal = ImageMath.eval("convert((a+b)/2, 'L')", dict(a=sub, b=coarse)).filter(self.fine_kernel)
+        self.goal = ImageMath.eval("convert(a+b, 'L')", dict(a=sub, b=sub.filter(self.large_blur)))
 
         self.debugview.paste(im=0, box=(0, 0,)+self.debugview.size)
         s = max(*self.debugview.size)
@@ -175,7 +183,8 @@ class GreatArtist:
         # Debug text
         velocities = ["v[%d] = %r" % (i, self.bot.vibration_modes[i].velocity)
                       for i  in range(len(self.bot.vibration_modes))]
-        debug_text = "mode %d\nscores=%r\n%s" % (self.bot.current_mode, self.mode_scores, '\n'.join(velocities))
+        debug_text = "mode %d, frame %06d\nscores=%r\n%s" % (
+            self.bot.current_mode, self.bot.frame_counter, self.mode_scores, '\n'.join(velocities))
         draw.text((1,1), debug_text, font=self.font, fill=255)
 
         # Show (magnified) velocity estimates for each vibration mode
@@ -188,7 +197,8 @@ class GreatArtist:
                 draw.line((s*from_pos[0], s*from_pos[1], s*to_pos[0], s*to_pos[1]), fill=255, width=w)
 
         status_im = Image.merge('RGB', (self.debugview, self.goal, self.progress))
-        status_im.save('out/%06d.png' % self.bot.frame_counter)
+        status_im.save('out/%06d.png' % self.output_frame_count)
+        self.output_frame_count += 1
 
     def _sample_goal_int(self, pos, border):
         if pos[0] < 0 or pos[0] > self.goal.size[0]-1 or pos[1] < 0 or pos[1] > self.goal.size[1]-1:
