@@ -202,7 +202,7 @@ class GreatArtist:
 
         s = max(*self.inspiration.size)
         draw = ImageDraw.Draw(self.progress)
-        draw.line((s*from_pos[0], s*from_pos[1], s*to_pos[0], s*to_pos[1]), fill=255, width=1)
+        draw.line((s*from_pos[0], s*from_pos[1], s*to_pos[0], s*to_pos[1]), fill=255, width=2)
 
     def update_goal(self):
         sub = ImageMath.eval("convert(a-b, 'L')", dict(a=self.inspiration, b=self.progress))
