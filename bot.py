@@ -79,7 +79,7 @@ class WiggleMode:
 
 class WiggleBot:
     pwm_initial = 0.6
-    pwm_acceleration = 1.1
+    pwm_acceleration = 1.05
 
     def __init__(self):
         self.pi = pigpio.pi()
@@ -94,7 +94,7 @@ class WiggleBot:
             self.pwm_initial * (mode_id == motor_id)
             for motor_id in range(self.motors.count)
         ]) for mode_id in range(self.motors.count)]
-        self.current_mode = random.randrange(0, self.motors.count)
+        self.change_mode(random.randrange(0, self.motors.count))
 
     def update(self):
         self.frame_counter += 1
@@ -156,7 +156,7 @@ class GreatArtist:
             self.bot.frame_counter, self.output_frame_count,
             self.bot.current_mode, self.mode_scores))
 
-    def choose_mode(self, reevaluation_interval=80):
+    def choose_mode(self, reevaluation_interval=20):
         scores = list(map(self.evaluate_vibration_mode, range(len(self.bot.vibration_modes))))
         self.mode_scores = scores
 
@@ -180,8 +180,8 @@ class GreatArtist:
         draw = ImageDraw.Draw(self.progress)
         draw.line((s*from_pos[0], s*from_pos[1], s*to_pos[0], s*to_pos[1]), fill=255, width=2)
 
-    def update_goal(self, feedback_bias=1):
-        sub = ImageMath.eval("convert(%d+a-b, 'L')" % feedback_bias, dict(a=self.inspiration, b=self.progress))
+    def update_goal(self):
+        sub = ImageMath.eval("convert(a-b, 'L')", dict(a=self.inspiration, b=self.progress))
         long_distance_blur = sub.filter(self.large_blur).filter(self.large_blur)
         self.goal = ImageMath.eval("convert(a+b, 'L')", dict(a=sub, b=long_distance_blur))
 
