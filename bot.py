@@ -240,7 +240,7 @@ class GreatArtist:
         self.sample_list.append(ipos)
         return self.goal.getpixel(ipos)
 
-    def evaluate_ray(self, vec, weight_multiple=0.5, length_multiple=1.2, num_samples=20):
+    def evaluate_ray(self, vec, weight_multiple=0.5, length_multiple=1.1, num_samples=20):
         """Score a ray starting at the current location, with the given per-frame velocity"""
 
         pos = self.bot.position
