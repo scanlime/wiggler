@@ -139,7 +139,7 @@ class GreatArtist:
                 time.sleep(delay_needed)
         self.step_timestamp = ts
 
-    def step(self, goal_update_rate=2.0, min_step_duration=1/15, mode_change_delay=1/4):
+    def step(self, goal_update_rate=0.5, min_step_duration=1/15, mode_change_delay=1/5):
         prev_position = self.bot.position
         self.bot.update()
         self.record_bot_travel(prev_position, self.bot.position)
@@ -163,7 +163,7 @@ class GreatArtist:
             self.bot.frame_counter, self.output_frame_count,
             self.bot.current_mode, self.mode_scores))
 
-    def choose_mode(self, reevaluation_interval=4.0):
+    def choose_mode(self, reevaluation_interval=2.5):
         scores = list(map(self.evaluate_vibration_mode, range(len(self.bot.vibration_modes))))
         self.mode_scores = scores
         best_mode = 0
@@ -223,7 +223,7 @@ class GreatArtist:
             zoom = 40
             if from_pos and mode.velocity:
                 to_pos = (from_pos[0] + mode.velocity[0]*zoom, from_pos[1] + mode.velocity[1]*zoom)
-                w = 1 + (mode == self.bot.vibration_modes[self.bot.current_mode])
+                w = 2 + 4 * (mode == self.bot.vibration_modes[self.bot.current_mode])
                 draw.line((s*from_pos[0], s*from_pos[1], s*to_pos[0], s*to_pos[1]), fill=255, width=w)
 
         status_im = Image.merge('RGB', (self.debugview, self.goal, self.progress))
@@ -280,7 +280,7 @@ class GreatArtist:
         total = 0
         if not vec:
             return 0
-        for angle in (2.5 * math.pi / 180.0, 0, -2.5 * math.pi / 180.0):
+        for angle in (-0.6, -0.2, 0.0, 0.2, 0.6):
             s, c = (math.sin(angle), math.cos(angle))
             rotated = (vec[0]*c - vec[1]*s, vec[0]*s + vec[1]*c)
             total += self.evaluate_ray(rotated)
