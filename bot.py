@@ -79,7 +79,7 @@ class WiggleMode:
 
 class WiggleBot:
     pwm_initial = 0.5
-    pwm_acceleration = 1.1
+    pwm_acceleration = 1.02
 
     def __init__(self):
         self.pi = pigpio.pi()
@@ -128,24 +128,26 @@ class GreatArtist:
         self.step_timestamp = None
         self.large_blur = ImageFilter.GaussianBlur(96)
 
-    def step(self, goal_update_rate=45, min_step_duration=1/15):
+    def step(self, goal_update_rate=40, min_step_duration=1/15, mode_change_delay=1/5):
         prev_position = self.bot.position
         self.bot.update()
         self.record_bot_travel(prev_position, self.bot.position)
 
+        step_duration = min_step_duration
         if self.bot.velocity and self.goal:
             next_mode = self.choose_mode()
             if next_mode == self.bot.current_mode:
                 self.bot.accelerate()
             else:
                 self.bot.change_mode(next_mode)
+                step_duration += mode_change_delay
 
         if 0 == (self.bot.frame_counter % goal_update_rate):
             self.update_goal()
 
         ts = time.time()
         if self.step_timestamp:
-            delay_needed = min_step_duration - (ts - self.step_timestamp)
+            delay_needed = step_duration - (ts - self.step_timestamp)
             if delay_needed > 0.001:
                 time.sleep(delay_needed)
         self.step_timestamp = ts
@@ -174,7 +176,8 @@ class GreatArtist:
 
     def update_goal(self):
         sub = ImageMath.eval("convert(a-b, 'L')", dict(a=self.inspiration, b=self.progress))
-        self.goal = ImageMath.eval("convert(a+b, 'L')", dict(a=sub, b=sub.filter(self.large_blur)))
+        long_distance_blur = sub.filter(self.large_blur).filter(self.large_blur)
+        self.goal = ImageMath.eval("convert(a+b, 'L')", dict(a=sub, b=long_distance_blur))
 
         self.debugview.paste(im=0, box=(0, 0,)+self.debugview.size)
         s = max(*self.debugview.size)
@@ -221,7 +224,7 @@ class GreatArtist:
         scaled = (pos[0] * to_pixels, pos[1] * to_pixels)
         return self._sample_goal_bilinear(scaled, border=edge_penalty)
 
-    def evaluate_ray(self, vec, step_length=0.02, weight_step=0.5, weight_min=0.001, error_score=1000.0):
+    def evaluate_ray(self, vec, weight_step=0.5, weight_min=1e-4, error_score=1e3):
         """Score a ray starting at the current location, with the given per-frame velocity"""
 
         pos = self.bot.position
@@ -233,6 +236,7 @@ class GreatArtist:
         vec_len = math.sqrt(math.pow(vec[0], 2) + math.pow(vec[1], 2))
         if vec_len <= 0:
             return error_score
+        step_length = 1.0 / min(*self.goal.size)
         step_vec = (vec[0] * step_length / vec_len, vec[1] * step_length / vec_len)
 
         while weight > weight_min:
@@ -242,7 +246,7 @@ class GreatArtist:
 
         return total
 
-    def evaluate_vibration_mode(self, index, age_modifier=1.0):
+    def evaluate_vibration_mode(self, index, age_modifier=0.1):
         mode = self.bot.vibration_modes[index]
         age = self.bot.frame_counter - (mode.last_frame_counter or -1000)
         score = self.evaluate_ray(mode.velocity)
