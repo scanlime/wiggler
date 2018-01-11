@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import time, random, math, sys
+from collections import namedtuple
 
 import pigpio
 import evdev
@@ -46,11 +47,10 @@ class TabletRx:
             if ecodes.EV_ABS in caps:
                 absolute = dict(caps[ecodes.EV_ABS])
                 if ecodes.ABS_X in absolute and ecodes.ABS_Y in absolute:
-                    self.x = absolute[ecodes.ABS_X]
-                    self.y = absolute[ecodes.ABS_Y]
+                    self.x, self.y = (absolute[ecodes.ABS_X], absolute[ecodes.ABS_Y])
                     self.dev = dev
                     return
-        raise IOError("No suitable tablet device found")
+        raise IOError("Couldn't find the tablet (looking for an input device with ABS_X and ABS_Y)")
 
     def poll(self):
         while True:
@@ -64,17 +64,9 @@ class TabletRx:
                     self.y = self.y._replace(value=event.value)
 
     def scaled_pos(self):
-        x_size = self.x.max - self.x.min
-        y_size = self.y.max - self.y.min
+        x_size, y_size = (self.x.max - self.x.min, self.y.max - self.y.min)
         scale = min(1.0 / x_size, 1.0 / y_size)
         return ((self.x.value - self.x.min) * scale, (self.y.value - self.y.min) * scale)
-
-
-class WiggleMode:
-    def __init__(self, pwm):
-        self.pwm = pwm
-        self.velocity = None
-        self.last_frame_counter = None
 
 
 class WiggleBot:
@@ -90,10 +82,12 @@ class WiggleBot:
         self.position = None
         self.velocity = None
         self.frame_counter = 0
-        self.vibration_modes = [WiggleMode([
-            self.pwm_initial * (mode_id == motor_id)
-            for motor_id in range(self.motors.count)
-        ]) for mode_id in range(self.motors.count)]
+
+        WiggleMode = namedtuple('WiggleMode', ['pwm', 'velocity', 'timestamp'])
+        self.vibration_modes = []
+        for mode_id in range(self.motors.count):
+            pwm = [self.pwm_initial * (mode_id == m) for m in range(self.motors.count)]
+            self.vibration_modes.append(WiggleMode(pwm=pwm, velocity=None, timestamp=None))
         self.change_mode(random.randrange(0, self.motors.count))
 
     def update(self):
@@ -103,8 +97,8 @@ class WiggleBot:
         if self.position:
             self.velocity = (position[0] - self.position[0], position[1] - self.position[1])
             m = self.vibration_modes[self.current_mode]
-            m.velocity = self.velocity
-            m.last_frame_counter = self.frame_counter
+            m = m._replace(velocity=self.velocity, timestamp=time.time())
+            self.vibration_modes[self.current_mode] = m
         self.position = position
 
     def accelerate(self):
@@ -124,27 +118,20 @@ class GreatArtist:
         self.progress = Image.new('L', self.inspiration.size, 0)
         self.debugview = Image.new('L', self.inspiration.size, 0)
         self.goal = None
+        self.goal_timestamp = None
         self.mode_scores = None
         self.step_timestamp = None
-        self.large_blur = ImageFilter.GaussianBlur(max(*self.inspiration.size)/3)
+        self.sample_list = []
+        self.large_blur = ImageFilter.GaussianBlur(max(*self.inspiration.size)//3)
 
-    def step(self, goal_update_rate=40, min_step_duration=1/10, mode_change_delay=1/6):
-        prev_position = self.bot.position
-        self.bot.update()
-        self.record_bot_travel(prev_position, self.bot.position)
+    def run(self):
+        try:
+            while True:
+                self.step()
+        finally:
+            self.bot.motors.off()
 
-        step_duration = min_step_duration
-        if self.bot.velocity and self.goal:
-            next_mode = self.choose_mode()
-            if next_mode == self.bot.current_mode:
-                self.bot.accelerate()
-            else:
-                self.bot.change_mode(next_mode)
-                step_duration += mode_change_delay
-
-        if 0 == (self.bot.frame_counter % goal_update_rate):
-            self.update_goal()
-
+    def time_step(self, step_duration):
         ts = time.time()
         if self.step_timestamp:
             delay_needed = step_duration - (ts - self.step_timestamp)
@@ -152,20 +139,49 @@ class GreatArtist:
                 time.sleep(delay_needed)
         self.step_timestamp = ts
 
+    def step(self, goal_update_rate=2.0, min_step_duration=1/15, mode_change_delay=1/4):
+        prev_position = self.bot.position
+        self.bot.update()
+        self.record_bot_travel(prev_position, self.bot.position)
+
+        step_duration = min_step_duration
+        if self.bot.velocity:
+            if not self.goal:
+                self.update_goal()
+            else:
+                next_mode = self.choose_mode()
+                if next_mode == self.bot.current_mode:
+                    self.bot.accelerate()
+                else:
+                    self.bot.change_mode(next_mode)
+                    step_duration += mode_change_delay
+                    if not self.goal_timestamp or time.time() - self.goal_timestamp > goal_update_rate:
+                        self.update_goal()
+        self.time_step(step_duration)
+
         print("frame %06d, output %06d, mode=%r, scores=%r" % (
             self.bot.frame_counter, self.output_frame_count,
             self.bot.current_mode, self.mode_scores))
 
-    def choose_mode(self, reevaluation_interval=20):
+    def choose_mode(self, reevaluation_interval=4.0):
         scores = list(map(self.evaluate_vibration_mode, range(len(self.bot.vibration_modes))))
         self.mode_scores = scores
-
         best_mode = 0
+        now = time.time()
         for mode, score in enumerate(scores):
-            last_frame_counter = self.bot.vibration_modes[mode].last_frame_counter
-            if (score > scores[best_mode] or
-                not last_frame_counter or
-                (self.bot.frame_counter - last_frame_counter >= reevaluation_interval)):
+            info = self.bot.vibration_modes[mode]
+            ts = info.timestamp
+            vel = info.velocity
+            if not vel or vel == (0.0, 0.0):
+                # Bad velocity estimate; get a new one
+                print("velocity forcing mode", mode)
+                return mode
+            if not ts or (now - ts) >= reevaluation_interval:
+                # Old estimate, refresh it
+                print("timestamp forcing mode", mode)
+                return mode
+            # Good estimates compete for best score
+            if score > scores[best_mode]: 
                 best_mode = mode
         return best_mode
 
@@ -178,7 +194,7 @@ class GreatArtist:
 
         s = max(*self.inspiration.size)
         draw = ImageDraw.Draw(self.progress)
-        draw.line((s*from_pos[0], s*from_pos[1], s*to_pos[0], s*to_pos[1]), fill=255, width=2)
+        draw.line((s*from_pos[0], s*from_pos[1], s*to_pos[0], s*to_pos[1]), fill=255, width=1)
 
     def update_goal(self):
         sub = ImageMath.eval("convert(a-b, 'L')", dict(a=self.inspiration, b=self.progress))
@@ -188,6 +204,11 @@ class GreatArtist:
         self.debugview.paste(im=0, box=(0, 0,)+self.debugview.size)
         s = max(*self.debugview.size)
         draw = ImageDraw.Draw(self.debugview)
+
+        # Ray casting samples, for debug
+        for pos in self.sample_list:
+            self.debugview.putpixel(pos, 128)
+        self.sample_list = []
 
         # Debug text
         velocities = ["v[%d] = %r" % (i, self.bot.vibration_modes[i].velocity)
@@ -199,7 +220,7 @@ class GreatArtist:
         # Show (magnified) velocity estimates for each vibration mode
         for mode in self.bot.vibration_modes:
             from_pos = self.bot.position
-            zoom = 10
+            zoom = 40
             if from_pos and mode.velocity:
                 to_pos = (from_pos[0] + mode.velocity[0]*zoom, from_pos[1] + mode.velocity[1]*zoom)
                 w = 1 + (mode == self.bot.vibration_modes[self.bot.current_mode])
@@ -208,10 +229,12 @@ class GreatArtist:
         status_im = Image.merge('RGB', (self.debugview, self.goal, self.progress))
         status_im.save('out/%06d.png' % self.output_frame_count)
         self.output_frame_count += 1
+        self.goal_timestamp = time.time()
 
     def _sample_goal_int(self, pos, border):
         if pos[0] < 0 or pos[0] > self.goal.size[0]-1 or pos[1] < 0 or pos[1] > self.goal.size[1]-1:
             return border
+        self.sample_list.append(pos)
         return self.goal.getpixel(pos)
 
     def _sample_goal_bilinear(self, pos, border):
@@ -225,41 +248,40 @@ class GreatArtist:
         sx1 = fpos[0] * s11 + (1.0 - fpos[0]) * s01
         return fpos[1] * sx0 + (1.0 - fpos[1]) * sx1
 
-    def sample_goal(self, pos, edge_penalty=-100.0):
+    def sample_goal(self, pos):
         to_pixels = max(*self.goal.size)
         scaled = (pos[0] * to_pixels, pos[1] * to_pixels)
-        return self._sample_goal_bilinear(scaled, border=edge_penalty)
+        return self._sample_goal_bilinear(scaled, border=0)
 
-    def evaluate_ray(self, vec, weight_step=0.75, weight_min=0.01, error_score=1e3):
+    def evaluate_ray(self, vec, weight_multiple=0.5, length_multiple=1.1, num_samples=40):
         """Score a ray starting at the current location, with the given per-frame velocity"""
 
         pos = self.bot.position
         total = 0
         weight = 1.0
-        step_length = 2.0 / min(*self.goal.size)
+        step_length = 1.0 / min(*self.goal.size)
 
         if not vec:
-            return error_score
+            return 0
         vec_len = math.sqrt(math.pow(vec[0], 2) + math.pow(vec[1], 2))
         if vec_len <= 0:
-            return error_score
+            return 0
         step_vec = (vec[0] * step_length / vec_len, vec[1] * step_length / vec_len)
 
-        while weight > weight_min:
+        for i in range(num_samples):
             pos = (pos[0] + step_vec[0], pos[1] + step_vec[1])
             total += self.sample_goal(pos) * weight
-            weight = weight * weight_step
+            weight = weight * weight_multiple
+            step_vec = (step_vec[0] * length_multiple, step_vec[1] * length_multiple)
 
         return total
 
     def evaluate_ray_bundle(self, vec):
-        if not vec:
-            return self.evaluate_ray(vec)
         total = 0
-        for i in range(-2,3):
-            angle = i * (math.pi / 180.0 * 5.0)
-            s = math.sin(angle)
-            c = math.cos(angle)
+        if not vec:
+            return 0
+        for angle in (2.5 * math.pi / 180.0, 0, -2.5 * math.pi / 180.0):
+            s, c = (math.sin(angle), math.cos(angle))
             rotated = (vec[0]*c - vec[1]*s, vec[0]*s + vec[1]*c)
             total += self.evaluate_ray(rotated)
         return total
@@ -269,14 +291,9 @@ class GreatArtist:
         return self.evaluate_ray_bundle(mode.velocity)
 
 
-def main():
-    a = GreatArtist(WiggleBot(), sys.argv[1])
-    try:
-        while True:
-            a.step()
-    finally:
-        a.bot.motors.off()
+def main(input_file):
+    GreatArtist(WiggleBot(), input_file).run()
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1])
 
