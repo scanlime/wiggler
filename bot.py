@@ -124,8 +124,8 @@ class GreatArtist:
         self.debugview = Image.new('L', self.inspiration.size, 0)
         self.goal = None
         self.mode_scores = None
-        self.coarse_kernel = ImageFilter.GaussianBlur(64)
-        self.fine_kernel = ImageFilter.GaussianBlur(3)
+        self.coarse_kernel = ImageFilter.GaussianBlur(96)
+        self.fine_kernel = ImageFilter.GaussianBlur(2)
 
     def step(self):
         prev_position = self.bot.position
@@ -161,7 +161,7 @@ class GreatArtist:
 
         s = max(*self.inspiration.size)
         draw = ImageDraw.Draw(self.progress)
-        draw.line((s*from_pos[0], s*from_pos[1], s*to_pos[0], s*to_pos[1]), fill=255, width=2)
+        draw.line((s*from_pos[0], s*from_pos[1], s*to_pos[0], s*to_pos[1]), fill=255, width=1)
 
     def update_goal(self):
         sub = ImageMath.eval("convert(a-b, 'L')", dict(a=self.inspiration, b=self.progress))
