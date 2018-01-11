@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 
-import time, random, math
+import time, random, math, sys
 
 import pigpio
 import evdev
 from evdev import ecodes
-from PIL import Image, ImageDraw, ImageFilter, ImageMath, ImageOps
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageMath, ImageOps
 
 
 class Motors:
-    def __init__(self, pi, hz=8000):
+    def __init__(self, pi, hz=200):
         self.pi = pi
         self.pins = (23, 24, 25)
         self.count = len(self.pins)
@@ -78,8 +78,8 @@ class WiggleMode:
 
 
 class WiggleBot:
-    pwm_initial = 0.8
-    pwm_acceleration = 1.01
+    pwm_initial = 0.5
+    pwm_acceleration = 1.1
 
     def __init__(self):
         self.pi = pigpio.pi()
@@ -118,16 +118,19 @@ class WiggleBot:
 class GreatArtist:
     def __init__(self, bot, inspiration):
         self.bot = bot
+        self.font = ImageFont.truetype('DroidSansMono.ttf', 10)
         self.inspiration = ImageOps.invert(Image.open(inspiration).convert('L'))
         self.progress = Image.new('L', self.inspiration.size, 0)
-        self.draw = ImageDraw.Draw(self.progress)
+        self.debugview = Image.new('L', self.inspiration.size, 0)
         self.goal = None
         self.mode_scores = None
         self.coarse_kernel = ImageFilter.GaussianBlur(64)
-        self.fine_kernel = ImageFilter.GaussianBlur(4)
+        self.fine_kernel = ImageFilter.GaussianBlur(3)
 
     def step(self):
+        prev_position = self.bot.position
         self.bot.update()
+        self.record_bot_travel(prev_position, self.bot.position)
 
         if self.bot.velocity and self.goal:
             next_mode = self.choose_mode()
@@ -136,9 +139,9 @@ class GreatArtist:
             else:
                 self.bot.change_mode(next_mode)
 
-        self.status()
         self.update_goal()
-        time.sleep(0.15)
+
+        print("frame %06d" % self.bot.frame_counter)
 
     def choose_mode(self):
         scores = list(map(self.evaluate_vibration_mode, range(len(self.bot.vibration_modes))))
@@ -149,53 +152,47 @@ class GreatArtist:
                 best_mode = mode
         return best_mode
 
-    def status(self):
-        velocities= [m.velocity for m in self.bot.vibration_modes]
-        print("Mode %d, mode_scores=%r velocities=%r" % (self.bot.current_mode, self.mode_scores, velocities))
+    def record_bot_travel(self, from_pos, to_pos, distance_threshold=0.1):
+        if not from_pos or not to_pos:
+            return
+        distance_squared = math.pow(to_pos[0] - from_pos[0], 2) + math.pow(to_pos[1] - from_pos[1], 2)
+        if distance_squared > math.pow(distance_threshold, 2):
+            return
+
+        s = max(*self.inspiration.size)
+        draw = ImageDraw.Draw(self.progress)
+        draw.line((s*from_pos[0], s*from_pos[1], s*to_pos[0], s*to_pos[1]), fill=255, width=2)
 
     def update_goal(self):
-        self.goal = self.inspiration
+        sub = ImageMath.eval("convert(a-b, 'L')", dict(a=self.inspiration, b=self.progress))
+        coarse = sub.filter(self.coarse_kernel).filter(self.coarse_kernel)
+        self.goal = ImageMath.eval("convert((a+b)/2, 'L')", dict(a=sub, b=coarse)).filter(self.fine_kernel)
 
-        # next_pos = tablet_rx.scaled_pos(self.inspiration.size)
-        # if self.pen_position:
-        #     self.draw.line(self.pen_position + next_pos, fill=255, width=1)
-        #     self.pen_velocity = (next_pos[0] - self.pen_position[0], next_pos[1] - self.pen_position[1])
+        self.debugview.paste(im=0, box=(0, 0,)+self.debugview.size)
+        s = max(*self.debugview.size)
+        draw = ImageDraw.Draw(self.debugview)
 
-        # sub = ImageMath.eval("convert(a-b*2/3, 'L')", dict(a=self.inspiration, b=self.progress))
-        # coarse = sub.filter(self.coarse_kernel).filter(self.coarse_kernel)
-        # self.eye = ImageMath.eval("convert((a+b)/2, 'L')", dict(a=sub, b=coarse)).filter(self.fine_kernel)
+        # Debug text
+        velocities = ["v[%d] = %r" % (i, self.bot.vibration_modes[i].velocity)
+                      for i  in range(len(self.bot.vibration_modes))]
+        debug_text = "mode %d\nscores=%r\n%s" % (self.bot.current_mode, self.mode_scores, '\n'.join(velocities))
+        draw.text((1,1), debug_text, font=self.font, fill=255)
 
-        # self.eye.save("out/eye-%06d.png" % self.counter)
-        # self.progress.save("out/prog-%06d.png" % self.counter)
-        # self.counter = self.counter + 1
-        # self.pen_position = next_pos
+        # Show (magnified) velocity estimates for each vibration mode
+        for mode in self.bot.vibration_modes:
+            from_pos = self.bot.position
+            zoom = 10
+            if from_pos and mode.velocity:
+                to_pos = (from_pos[0] + mode.velocity[0]*zoom, from_pos[1] + mode.velocity[1]*zoom)
+                w = 1 + (mode == self.bot.vibration_modes[self.bot.current_mode])
+                draw.line((s*from_pos[0], s*from_pos[1], s*to_pos[0], s*to_pos[1]), fill=255, width=w)
 
-    # def should_change_direction(self, threshold=0.6):
-
-    #     if not self.pen_velocity:
-    #         return False
-
-    #     current_score = self.evaluate_ray(self.pen_velocity)
-    #     sampled_scores = self.evaluate_random_rays()
-    #     print("current direction: %r   others: %r" % (current_score, sampled_scores))
-
-    #     return current_score < sampled_scores[int(len(sampled_scores) * threshold)]
-
-    # def evaluate_random_rays(self, count=16):
-    #     pen_speed = math.sqrt(math.pow(self.pen_velocity[0], 2) + math.pow(self.pen_velocity[1], 2))
-    #     jitter = random.uniform(0, math.pi*2.0)
-    #     rays = []
-    #     for i in range(count):
-    #         angle = i * math.pi * 2.0 / (count - 1.0)
-    #         vec = (pen_speed * math.cos(angle), pen_speed * math.sin(angle))
-    #         rays.append(self.evaluate_ray(vec))
-    #     rays.sort()
-    #     return rays
+        status_im = Image.merge('RGB', (self.debugview, self.goal, self.progress))
+        status_im.save('out/%06d.png' % self.bot.frame_counter)
 
     def _sample_goal_int(self, pos, border):
         if pos[0] < 0 or pos[0] > self.goal.size[0]-1 or pos[1] < 0 or pos[1] > self.goal.size[1]-1:
             return border
-        print(pos)
         return self.goal.getpixel(pos)
 
     def _sample_goal_bilinear(self, pos, border):
@@ -214,7 +211,7 @@ class GreatArtist:
         scaled = (pos[0] * to_pixels, pos[1] * to_pixels)
         return self._sample_goal_bilinear(scaled, border=edge_penalty)
 
-    def evaluate_ray(self, vec, step_length=0.02, weight_step=0.5, weight_min=0.001):
+    def evaluate_ray(self, vec, step_length=0.02, weight_step=0.5, weight_min=0.001, error_score=1000.0):
         """Score a ray starting at the current location, with the given per-frame velocity"""
 
         pos = self.bot.position
@@ -222,10 +219,10 @@ class GreatArtist:
         weight = 1.0
 
         if not vec:
-            return 0
+            return error_score
         vec_len = math.sqrt(math.pow(vec[0], 2) + math.pow(vec[1], 2))
         if vec_len <= 0:
-            return 0
+            return error_score
         step_vec = (vec[0] * step_length / vec_len, vec[1] * step_length / vec_len)
 
         while weight > weight_min:
@@ -237,13 +234,13 @@ class GreatArtist:
 
     def evaluate_vibration_mode(self, index, age_modifier=1.0):
         mode = self.bot.vibration_modes[index]
-        age = self.bot.frame_counter - (mode.last_frame_counter or 0)
+        age = self.bot.frame_counter - (mode.last_frame_counter or -1000)
         score = self.evaluate_ray(mode.velocity)
         return score + age_modifier * age
 
 
 def main():
-    a = GreatArtist(WiggleBot(), "images/rng2.png")
+    a = GreatArtist(WiggleBot(), sys.argv[1])
     try:
         while True:
             a.step()
