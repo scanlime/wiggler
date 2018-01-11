@@ -70,8 +70,9 @@ class TabletRx:
 
 
 class WiggleBot:
-    pwm_initial = 0.6
-    pwm_acceleration = 1.05
+    pwm_initial_increment = 0.01
+    pwm_initial_decay = 0.001
+    pwm_acceleration = 1.02
 
     def __init__(self):
         self.pi = pigpio.pi()
@@ -82,16 +83,18 @@ class WiggleBot:
         self.position = None
         self.velocity = None
         self.frame_counter = 0
+        self.pwm_initial = 0
 
         WiggleMode = namedtuple('WiggleMode', ['pwm', 'velocity', 'timestamp'])
         self.vibration_modes = []
         for mode_id in range(self.motors.count):
-            pwm = [self.pwm_initial * (mode_id == m) for m in range(self.motors.count)]
+            pwm = [(mode_id == m) for m in range(self.motors.count)]
             self.vibration_modes.append(WiggleMode(pwm=pwm, velocity=None, timestamp=None))
         self.change_mode(random.randrange(0, self.motors.count))
 
     def update(self):
         self.frame_counter += 1
+        self.pwm_initial = max(0.0, self.pwm_initial - self.pwm_initial_decay)
         self.tablet_rx.poll()
         position = self.tablet_rx.scaled_pos()
         if self.position:
@@ -104,9 +107,15 @@ class WiggleBot:
     def accelerate(self):
         self.motors.set([min(1.0, s * self.pwm_acceleration) for s in self.motors.speeds])
 
+    def increase_minimum_pwm(self):
+        self.pwm_initial = min(1.0, self.pwm_initial + self.pwm_initial_increment)
+        self.change_mode(self.current_mode)
+        print(self.pwm_initial)
+
     def change_mode(self, mode):
         self.current_mode = mode
-        self.motors.set(self.vibration_modes[self.current_mode].pwm)
+        pwm = self.vibration_modes[self.current_mode].pwm
+        self.motors.set([p * self.pwm_initial for p in pwm])
 
 
 class GreatArtist:
@@ -122,7 +131,7 @@ class GreatArtist:
         self.mode_scores = None
         self.step_timestamp = None
         self.sample_list = []
-        self.large_blur = ImageFilter.GaussianBlur(max(*self.inspiration.size)//3)
+        self.large_blur = ImageFilter.GaussianBlur(max(*self.inspiration.size)//4)
 
     def run(self):
         try:
@@ -139,7 +148,7 @@ class GreatArtist:
                 time.sleep(delay_needed)
         self.step_timestamp = ts
 
-    def step(self, goal_update_rate=0.5, min_step_duration=1/15, mode_change_delay=1/5):
+    def step(self, goal_update_rate=1.0, min_step_duration=1/15, mode_change_delay=1/5):
         prev_position = self.bot.position
         self.bot.update()
         self.record_bot_travel(prev_position, self.bot.position)
@@ -159,11 +168,11 @@ class GreatArtist:
                         self.update_goal()
         self.time_step(step_duration)
 
-        print("frame %06d, output %06d, mode=%r, scores=%r" % (
+        print("frame %06d, output %06d, pwm=%r, scores=%r" % (
             self.bot.frame_counter, self.output_frame_count,
-            self.bot.current_mode, self.mode_scores))
+            self.bot.motors.speeds, self.mode_scores))
 
-    def choose_mode(self, reevaluation_interval=2.5):
+    def choose_mode(self, reevaluation_interval=2.5, min_speed=3e-5):
         scores = list(map(self.evaluate_vibration_mode, range(len(self.bot.vibration_modes))))
         self.mode_scores = scores
         best_mode = 0
@@ -171,16 +180,15 @@ class GreatArtist:
         for mode, score in enumerate(scores):
             info = self.bot.vibration_modes[mode]
             ts = info.timestamp
-            vel = info.velocity
-            if not vel or vel == (0.0, 0.0):
-                # Bad velocity estimate; get a new one
-                print("velocity forcing mode", mode)
+            vel = info.velocity or (0, 0)
+            speed_squared = vel[0]*vel[0] + vel[1]*vel[1]
+            if speed_squared < min_speed * min_speed:
+                print("velocity forcing mode=%d, speed=%s" % (mode, math.sqrt(speed_squared)))
+                self.bot.increase_minimum_pwm()
                 return mode
             if not ts or (now - ts) >= reevaluation_interval:
-                # Old estimate, refresh it
-                print("timestamp forcing mode", mode)
+                print("timestamp forcing mode=%d, t=%s" % (mode, now - ts))
                 return mode
-            # Good estimates compete for best score
             if score > scores[best_mode]: 
                 best_mode = mode
         return best_mode
@@ -201,26 +209,22 @@ class GreatArtist:
         long_distance_blur = sub.filter(self.large_blur).filter(self.large_blur)
         self.goal = ImageMath.eval("convert(a+b, 'L')", dict(a=sub, b=long_distance_blur))
 
-        self.debugview.paste(im=0, box=(0, 0,)+self.debugview.size)
         s = max(*self.debugview.size)
         draw = ImageDraw.Draw(self.debugview)
-
-        # Ray casting samples, for debug
-        for pos in self.sample_list:
-            self.debugview.putpixel(pos, 128)
-        self.sample_list = []
 
         # Debug text
         velocities = ["v[%d] = %r" % (i, self.bot.vibration_modes[i].velocity)
                       for i  in range(len(self.bot.vibration_modes))]
-        debug_text = "mode %d, frame %06d\nscores=%r\n%s" % (
-            self.bot.current_mode, self.bot.frame_counter, self.mode_scores, '\n'.join(velocities))
+        debug_text = "mode %d, frame %06d\npwm=%r\nscores=%r\n%s" % (
+            self.bot.current_mode, self.bot.frame_counter,
+            self.bot.motors.speeds, self.mode_scores,
+            '\n'.join(velocities))
         draw.text((1,1), debug_text, font=self.font, fill=255)
-
+       
         # Show (magnified) velocity estimates for each vibration mode
         for mode in self.bot.vibration_modes:
             from_pos = self.bot.position
-            zoom = 40
+            zoom = 100
             if from_pos and mode.velocity:
                 to_pos = (from_pos[0] + mode.velocity[0]*zoom, from_pos[1] + mode.velocity[1]*zoom)
                 w = 2 + 4 * (mode == self.bot.vibration_modes[self.bot.current_mode])
@@ -230,6 +234,7 @@ class GreatArtist:
         status_im.save('out/%06d.png' % self.output_frame_count)
         self.output_frame_count += 1
         self.goal_timestamp = time.time()
+        self.debugview.paste(im=0, box=(0, 0,)+self.debugview.size)
 
     def sample_goal(self, pos, border=0):
         size = self.goal.size
@@ -237,10 +242,11 @@ class GreatArtist:
         ipos = (int(pos[0] * to_pixels), int(pos[1] * to_pixels))
         if ipos[0] < 0 or ipos[0] > size[0]-1 or ipos[1] < 0 or ipos[1] > size[1]-1:
             return border
-        self.sample_list.append(ipos)
+
+        self.debugview.putpixel(ipos, 128)
         return self.goal.getpixel(ipos)
 
-    def evaluate_ray(self, vec, weight_multiple=0.5, length_multiple=1.1, num_samples=20):
+    def evaluate_ray(self, vec, weight_multiple=0.2, length_multiple=1.1, num_samples=20):
         """Score a ray starting at the current location, with the given per-frame velocity"""
 
         pos = self.bot.position
