@@ -72,7 +72,7 @@ class TabletRx:
 class WiggleBot:
     pwm_initial_increment = 0.01
     pwm_initial_decay = 0.001
-    pwm_acceleration = 1.02
+    pwm_acceleration = 1.01
 
     def __init__(self):
         self.pi = pigpio.pi()
@@ -172,7 +172,7 @@ class GreatArtist:
             self.bot.frame_counter, self.output_frame_count,
             self.bot.motors.speeds, self.mode_scores))
 
-    def choose_mode(self, reevaluation_interval=2.5, min_speed=3e-5):
+    def choose_mode(self, reevaluation_interval=2.5, min_speed=6e-5):
         scores = list(map(self.evaluate_vibration_mode, range(len(self.bot.vibration_modes))))
         self.mode_scores = scores
         best_mode = 0
@@ -246,7 +246,7 @@ class GreatArtist:
         self.debugview.putpixel(ipos, 128)
         return self.goal.getpixel(ipos)
 
-    def evaluate_ray(self, vec, weight_multiple=0.2, length_multiple=1.1, num_samples=20):
+    def evaluate_ray(self, vec, weight_multiple=0.02, length_multiple=1.1, num_samples=20):
         """Score a ray starting at the current location, with the given per-frame velocity"""
 
         pos = self.bot.position
