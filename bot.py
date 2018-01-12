@@ -150,7 +150,7 @@ class GreatArtist:
                 time.sleep(delay_needed)
         self.step_timestamp = ts
 
-    def step(self, goal_update_rate=1.0, min_step_duration=1/15, mode_change_delay=1/5):
+    def step(self, goal_update_rate=1.0, min_step_duration=1/10, mode_change_delay=1/5):
         prev_position = self.bot.position
         self.bot.update()
         self.record_bot_travel(prev_position, self.bot.position)
@@ -168,6 +168,8 @@ class GreatArtist:
                     step_duration += mode_change_delay
                     if not self.goal_timestamp or time.time() - self.goal_timestamp > goal_update_rate:
                         self.update_goal()
+
+        self.draw_debug_vibration_modes()
         self.time_step(step_duration)
 
         print("frame %06d, output %06d, pwm=%r, scores=%r" % (
@@ -206,35 +208,40 @@ class GreatArtist:
         draw = ImageDraw.Draw(self.progress)
         draw.line((s*from_pos[0], s*from_pos[1], s*to_pos[0], s*to_pos[1]), fill=255, width=1)
 
+    def draw_debug_text(self):
+        velocities = ["v[%d] = %r" % (i, self.bot.vibration_modes[i].velocity)
+                      for i  in range(len(self.bot.vibration_modes))]
+
+        debug_text = "mode %d, frame %06d\npwm=%r\nscores=%r\n%s" % (
+            self.bot.current_mode, self.bot.frame_counter,
+            self.bot.motors.speeds, self.mode_scores,
+            '\n'.join(velocities))
+
+        draw = ImageDraw.Draw(self.debugview)
+        draw.text((1,1), debug_text, font=self.font, fill=255)
+
+    def draw_debug_vibration_modes(self):
+        mode = self.bot.vibration_modes[self.bot.current_mode]
+        self.draw_vibration_mode_line(mode, self.bot.position, 50, 1)
+
+    def draw_vibration_mode_line(self, mode, from_pos, zoom, width):
+        draw = ImageDraw.Draw(self.debugview)
+        s = max(*self.debugview.size)
+        if from_pos and mode.velocity:
+            to_pos = (from_pos[0] + mode.velocity[0]*zoom, from_pos[1] + mode.velocity[1]*zoom)
+            draw.line((s*from_pos[0], s*from_pos[1], s*to_pos[0], s*to_pos[1]), fill=255, width=width)
+
     def update_goal(self):
         prog_blur = self.progress.filter(self.short_blur)
         sub = ImageMath.eval("convert(1 + a - b*2 + a/10, 'L')", dict(a=self.inspiration, b=prog_blur))
         long_distance_blur = sub.filter(self.large_blur)
         self.goal = ImageMath.eval("convert(a+b, 'L')", dict(a=sub, b=long_distance_blur))
 
-        s = max(*self.debugview.size)
-        draw = ImageDraw.Draw(self.debugview)
-
-        # Debug text
-        velocities = ["v[%d] = %r" % (i, self.bot.vibration_modes[i].velocity)
-                      for i  in range(len(self.bot.vibration_modes))]
-        debug_text = "mode %d, frame %06d\npwm=%r\nscores=%r\n%s" % (
-            self.bot.current_mode, self.bot.frame_counter,
-            self.bot.motors.speeds, self.mode_scores,
-            '\n'.join(velocities))
-        draw.text((1,1), debug_text, font=self.font, fill=255)
+        self.draw_debug_text()
        
-        # Show (magnified) velocity estimates for each vibration mode
-        for mode in self.bot.vibration_modes:
-            from_pos = self.bot.position
-            zoom = 100
-            if from_pos and mode.velocity:
-                to_pos = (from_pos[0] + mode.velocity[0]*zoom, from_pos[1] + mode.velocity[1]*zoom)
-                w = 2 + 4 * (mode == self.bot.vibration_modes[self.bot.current_mode])
-                draw.line((s*from_pos[0], s*from_pos[1], s*to_pos[0], s*to_pos[1]), fill=255, width=w)
-
         status_im = Image.merge('RGB', (self.debugview, self.goal, self.progress))
         status_im.save('out/%06d.png' % self.output_frame_count)
+
         self.output_frame_count += 1
         self.goal_timestamp = time.time()
         self.debugview.paste(im=0, box=(0, 0,)+self.debugview.size)
