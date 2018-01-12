@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 
 import time, random, math, sys
-import subprocess
-from collections import namedtuple
-from multiprocessing import Process, Queue
+import subprocess, collections, multiprocessing, queue
 
 import pygame
 import pigpio
@@ -88,7 +86,7 @@ class WiggleBot:
         self.frame_counter = 0
         self.pwm_initial = 0
 
-        WiggleMode = namedtuple('WiggleMode', ['pwm', 'velocity', 'timestamp'])
+        WiggleMode = collections.namedtuple('WiggleMode', ['pwm', 'velocity', 'timestamp'])
         self.vibration_modes = []
         for mode_id in range(self.motors.count):
             pwm = [(mode_id == m) for m in range(self.motors.count)]
@@ -123,12 +121,15 @@ class WiggleBot:
 class Display:
     def start(self, size):
         self.size = size
-        self.queue = Queue(2)
-        self.process = Process(target=self._proc)
+        self.queue = multiprocessing.Queue(2)
+        self.process = multiprocessing.Process(target=self._proc)
         self.process.start()
 
     def show(self, img):
-        self.queue.put_nowait(img.tobytes())
+        try:
+            self.queue.put_nowait(img.tobytes())
+        except queue.Full:
+            pass
 
     def _proc(self):
         screen = pygame.display.set_mode(self.size)
@@ -288,14 +289,14 @@ class GreatArtist:
             draw.line((s*from_pos[0], s*from_pos[1], s*to_pos[0], s*to_pos[1]), fill=255, width=width)
 
     def update_goal(self):
-        sub = ImageMath.eval("convert(32 + i + i/10 - prog/2 - pblur, 'L')", dict(
+        sub = ImageMath.eval("convert(i + i/10 - prog - pblur, 'L')", dict(
             i=self.inspiration, prog=self.progress, pblur=self.progress.filter(self.short_blur)))
         long_distance_blur = sub.filter(self.large_blur)
         self.goal = ImageMath.eval("convert(a+b, 'L')", dict(a=sub, b=long_distance_blur))
 
         self.draw_debug_text()
        
-        status_im = ImageOps.invert(Image.merge('RGB', (self.progress, self.debugview, self.goal)))
+        status_im = Image.merge('RGB', (self.debugview, self.goal, ImageOps.invert(self.progress)))
         self.display.show(status_im)
         self.movie.encode(status_im)
 
@@ -311,11 +312,7 @@ class GreatArtist:
             return border
 
         self.debugview.putpixel(ipos, 128)
-        p = self.goal.getpixel(ipos) - 32
-        if p > 0:
-            return p * p 
-        else:
-            return -p * p
+        return self.goal.getpixel(ipos)
 
     def evaluate_ray(self, vec, weight_multiple=0.1, length_multiple=1.15, num_samples=20):
         """Score a ray starting at the current location, with the given per-frame velocity"""
