@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 
 import time, random, math, sys
+import subprocess
 from collections import namedtuple
+from multiprocessing import Process, Queue
 
+import pygame
 import pigpio
 import evdev
 from evdev import ecodes
@@ -117,11 +120,54 @@ class WiggleBot:
         self.motors.set([p * self.pwm_initial for p in pwm])
 
 
+class Display:
+    def start(self, size):
+        self.size = size
+        self.queue = Queue(2)
+        self.process = Process(target=self._proc)
+        self.process.start()
+
+    def show(self, img):
+        self.queue.put_nowait(img.tobytes())
+
+    def _proc(self):
+        screen = pygame.display.set_mode(self.size)
+        pygame.display.set_caption('Wiggle Bot')
+        while True:
+            surf = pygame.image.fromstring(self.queue.get(), self.size, 'RGB')
+            screen.blit(surf, dest=(0,0))
+            pygame.display.update()
+
+
+class VideoEncoder:
+    def start(self, filename, size, fps=30, crf=15):
+        self.filename = filename
+        self.fps = fps
+        self.crf = crf
+        self.size = size
+        self.proc = subprocess.Popen([
+            'ffmpeg', '-y',
+            '-pix_fmt', 'rgb24',
+            '-f', 'rawvideo',
+            '-s', '%dx%d' % self.size,
+            '-r', str(self.fps),
+            '-i', '-',
+            '-crf', str(self.crf),
+            self.filename],
+        stdin=subprocess.PIPE)
+
+    def encode(self, img):
+        self.proc.stdin.write(img.tobytes())
+
+
 class GreatArtist:
-    def __init__(self, bot, inspiration):
-        self.bot = bot
-        self.output_frame_count = 0
+    def __init__(self, inspiration):
+        self.bot = WiggleBot()
+        self.display = Display()
+        self.movie = VideoEncoder()
         self.font = ImageFont.truetype('DroidSansMono.ttf', 10)
+
+        self.output_frame_count = 0
         self.inspiration = ImageOps.invert(Image.open(inspiration).convert('L'))
         self.progress = Image.new('L', self.inspiration.size, 0)
         self.debugview = Image.new('L', self.inspiration.size, 0)
@@ -129,10 +175,14 @@ class GreatArtist:
         self.goal_timestamp = None
         self.mode_scores = None
         self.step_timestamp = None
-        self.sample_list = []
+
         major_axis = max(*self.inspiration.size)
         self.large_blur = ImageFilter.GaussianBlur(major_axis/3)
         self.short_blur = ImageFilter.GaussianBlur(major_axis/400)
+
+        movie_file = time.strftime('bot-%y%m%d-%H%M%S.m4v', time.localtime())
+        self.movie.start(movie_file, self.inspiration.size)
+        self.display.start(self.inspiration.size)
 
     def run(self):
         try:
@@ -220,13 +270,15 @@ class GreatArtist:
         draw.text((1,1), debug_text, font=self.font, fill=255)
 
     def draw_debug_vibration_modes(self):
-        mode = self.bot.vibration_modes[self.bot.current_mode]
+        modes = self.bot.vibration_modes
+        current = self.bot.current_mode 
 
         # Current mode follows the bot
-        self.draw_vibration_mode_line(mode, self.bot.position)
+        self.draw_vibration_mode_line(modes[current], self.bot.position)
 
         # Chart per-mode, along the bottom edge from the left
-        self.draw_vibration_mode_line(mode, ((0.08 + self.bot.current_mode * 0.1), 0.5))
+        for i, mode in enumerate(modes):
+            self.draw_vibration_mode_line(mode, ((0.08 + i * 0.1), 0.5))
 
     def draw_vibration_mode_line(self, mode, from_pos, zoom=20, width=1):
         draw = ImageDraw.Draw(self.debugview)
@@ -247,7 +299,8 @@ class GreatArtist:
         self.draw_debug_text()
        
         status_im = Image.merge('RGB', (self.debugview, self.goal, self.progress))
-        status_im.save('out/%06d.png' % self.output_frame_count)
+        self.display.show(status_im)
+        self.movie.encode(status_im)
 
         self.output_frame_count += 1
         self.goal_timestamp = time.time()
@@ -306,9 +359,10 @@ class GreatArtist:
         return self.evaluate_ray_bundle(mode.velocity)
 
 
-def main(input_file):
-    GreatArtist(WiggleBot(), input_file).run()
-
 if __name__ == "__main__":
-    main(sys.argv[1])
+    if len(sys.argv) == 2:
+        GreatArtist(sys.argv[1]).run()
+    else:
+        sys.stderr.write('usage: %s <image file>\n' % sys.argv[0])
+
 
