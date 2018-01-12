@@ -73,7 +73,7 @@ class TabletRx:
 class WiggleBot:
     pwm_initial_increment = 0.01
     pwm_initial_decay = 0.001
-    pwm_acceleration = 1.01
+    pwm_acceleration = 1.03
 
     def __init__(self):
         self.pi = pigpio.pi()
@@ -200,7 +200,7 @@ class GreatArtist:
                 time.sleep(delay_needed)
         self.step_timestamp = ts
 
-    def step(self, goal_update_rate=1.0, min_step_duration=1/10, mode_change_delay=1/5):
+    def step(self, goal_update_rate=1.0, min_step_duration=1/8, mode_change_delay=1/5):
         prev_position = self.bot.position
         self.bot.update()
         self.record_bot_travel(prev_position, self.bot.position)
@@ -226,7 +226,7 @@ class GreatArtist:
             self.bot.frame_counter, self.output_frame_count,
             self.bot.motors.speeds, self.mode_scores))
 
-    def choose_mode(self, reevaluation_interval=8.0, min_speed=6e-5):
+    def choose_mode(self, reevaluation_interval=8.0, min_speed=8e-5):
         scores = list(map(self.evaluate_vibration_mode, range(len(self.bot.vibration_modes))))
         self.mode_scores = scores
         best_mode = 0
@@ -258,17 +258,6 @@ class GreatArtist:
         draw = ImageDraw.Draw(self.progress)
         draw.line((s*from_pos[0], s*from_pos[1], s*to_pos[0], s*to_pos[1]), fill=255, width=1)
 
-    def draw_debug_text(self):
-        velocities = ["v[%d] = %r" % (i, self.bot.vibration_modes[i].velocity)
-                      for i  in range(len(self.bot.vibration_modes))]
-
-        debug_text = "mode %d, frame %06d\npwm=%r" % (
-            self.bot.current_mode, self.bot.frame_counter,
-            self.bot.motors.speeds)
-
-        draw = ImageDraw.Draw(self.debugview)
-        draw.text((1,1), debug_text, font=self.font, fill=255)
-
     def draw_debug_vibration_modes(self):
         modes = self.bot.vibration_modes
         current = self.bot.current_mode 
@@ -278,7 +267,7 @@ class GreatArtist:
 
         # Chart per-mode, along the bottom edge from the left
         for i, mode in enumerate(modes):
-            self.draw_vibration_mode_line(mode, ((0.08 + i * 0.1), 0.5))
+            self.draw_vibration_mode_line(mode, ((0.1 + i * 0.5), 0.5))
 
     def draw_vibration_mode_line(self, mode, from_pos, zoom=20, width=1):
         draw = ImageDraw.Draw(self.debugview)
@@ -293,8 +282,6 @@ class GreatArtist:
         long_distance_blur = sub.filter(self.large_blur)
         self.goal = ImageMath.eval("convert(a+b, 'L')", dict(a=sub, b=long_distance_blur))
 
-        self.draw_debug_text()
-       
         status_im = Image.merge('RGB', (self.debugview, self.goal, ImageOps.invert(self.progress)))
         self.display.show(status_im)
         self.movie.encode(status_im)
