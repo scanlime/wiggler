@@ -7,7 +7,7 @@ import pygame
 import pigpio
 import evdev
 from evdev import ecodes
-from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageMath, ImageOps
+from PIL import Image, ImageDraw, ImageFilter, ImageMath, ImageOps
 
 
 class Motors:
@@ -166,7 +166,6 @@ class GreatArtist:
         self.bot = WiggleBot()
         self.display = Display()
         self.movie = VideoEncoder()
-        self.font = ImageFont.truetype('DroidSansMono.ttf', 10)
 
         self.output_frame_count = 0
         self.inspiration = ImageOps.invert(Image.open(inspiration).convert('L'))
