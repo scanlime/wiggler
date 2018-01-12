@@ -73,7 +73,7 @@ class TabletRx:
 class WiggleBot:
     pwm_initial_increment = 0.01
     pwm_initial_decay = 0.001
-    pwm_acceleration = 1.03
+    pwm_acceleration = 1.012
 
     def __init__(self):
         self.pi = pigpio.pi()
