@@ -295,7 +295,7 @@ class GreatArtist:
 
         self.draw_debug_text()
        
-        status_im = Image.merge('RGB', (self.debugview, self.goal, self.progress))
+        status_im = ImageOps.invert(Image.merge('RGB', (self.progress, self.debugview, self.goal)))
         self.display.show(status_im)
         self.movie.encode(status_im)
 
