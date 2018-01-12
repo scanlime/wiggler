@@ -177,8 +177,8 @@ class GreatArtist:
         self.step_timestamp = None
 
         major_axis = max(*self.inspiration.size)
-        self.large_blur = ImageFilter.GaussianBlur(major_axis/3)
-        self.short_blur = ImageFilter.GaussianBlur(major_axis/400)
+        self.large_blur = ImageFilter.GaussianBlur(major_axis/4)
+        self.short_blur = ImageFilter.GaussianBlur(major_axis/150)
 
         movie_file = time.strftime('bot-%y%m%d-%H%M%S.m4v', time.localtime())
         self.movie.start(movie_file, self.inspiration.size)
@@ -225,7 +225,7 @@ class GreatArtist:
             self.bot.frame_counter, self.output_frame_count,
             self.bot.motors.speeds, self.mode_scores))
 
-    def choose_mode(self, reevaluation_interval=2.5, min_speed=5e-4):
+    def choose_mode(self, reevaluation_interval=2.5, min_speed=1e-4):
         scores = list(map(self.evaluate_vibration_mode, range(len(self.bot.vibration_modes))))
         self.mode_scores = scores
         best_mode = 0
@@ -280,19 +280,16 @@ class GreatArtist:
         for i, mode in enumerate(modes):
             self.draw_vibration_mode_line(mode, ((0.08 + i * 0.1), 0.5))
 
-    def draw_vibration_mode_line(self, mode, from_pos, zoom=20, width=1):
+    def draw_vibration_mode_line(self, mode, from_pos, zoom=10, width=1):
         draw = ImageDraw.Draw(self.debugview)
         s = max(*self.debugview.size)
         if from_pos and mode.velocity:
             to_pos = (from_pos[0] + mode.velocity[0]*zoom, from_pos[1] + mode.velocity[1]*zoom)
-            # Central dot
-            self.debugview.paste(im=128, box=(int(s*from_pos[0]-1),int(s*from_pos[1]-1),3,3))
-            # Pointy vector
             draw.line((s*from_pos[0], s*from_pos[1], s*to_pos[0], s*to_pos[1]), fill=255, width=width)
 
     def update_goal(self):
-        prog_blur = self.progress.filter(self.short_blur)
-        sub = ImageMath.eval("convert(1 + a - b*2 + a/10, 'L')", dict(a=self.inspiration, b=prog_blur))
+        sub = ImageMath.eval("convert(32 + i + i/10 - prog/2 - pblur, 'L')", dict(
+            i=self.inspiration, prog=self.progress, pblur=self.progress.filter(self.short_blur)))
         long_distance_blur = sub.filter(self.large_blur)
         self.goal = ImageMath.eval("convert(a+b, 'L')", dict(a=sub, b=long_distance_blur))
 
@@ -314,9 +311,13 @@ class GreatArtist:
             return border
 
         self.debugview.putpixel(ipos, 128)
-        return self.goal.getpixel(ipos)
+        p = self.goal.getpixel(ipos) - 32
+        if p > 0:
+            return p * p 
+        else:
+            return -p * p
 
-    def evaluate_ray(self, vec, weight_multiple=0.01, length_multiple=1.1, num_samples=20):
+    def evaluate_ray(self, vec, weight_multiple=0.1, length_multiple=1.15, num_samples=20):
         """Score a ray starting at the current location, with the given per-frame velocity"""
 
         pos = self.bot.position
@@ -339,24 +340,9 @@ class GreatArtist:
 
         return total
 
-    def evaluate_rotated_ray(self, vec, degree_offset):
-        angle = degree_offset * math.pi / 180.0
-        s, c = (math.sin(angle), math.cos(angle))
-        rotated = (vec[0]*c - vec[1]*s, vec[0]*s + vec[1]*c)
-        return self.evaluate_ray(rotated)
-
-    def evaluate_ray_bundle(self, vec):
-        if not vec:
-            return 0
-        return (self.evaluate_ray(vec) +
-                self.evaluate_rotated_ray(vec, -1) * 0.3 +
-                self.evaluate_rotated_ray(vec, 1) * 0.3 +
-                self.evaluate_rotated_ray(vec, -30) * 0.1 +
-                self.evaluate_rotated_ray(vec, 30) * 0.1)               
-
     def evaluate_vibration_mode(self, index):
         mode = self.bot.vibration_modes[index]
-        return self.evaluate_ray_bundle(mode.velocity)
+        return self.evaluate_ray(mode.velocity)
 
 
 if __name__ == "__main__":
