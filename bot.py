@@ -88,8 +88,8 @@ class WiggleBot:
 
         WiggleMode = collections.namedtuple('WiggleMode', ['pwm', 'velocity', 'timestamp'])
         self.vibration_modes = []
-        for mode_id in range(self.motors.count):
-            pwm = [(mode_id == m) for m in range(self.motors.count)]
+        for mode_id in range(1, (1 << self.motors.count) - 1):
+            pwm = [(mode_id >> m) & 1 for m in range(self.motors.count)]
             self.vibration_modes.append(WiggleMode(pwm=pwm, velocity=None, timestamp=None))
         self.change_mode(random.randrange(0, self.motors.count))
 
@@ -226,7 +226,7 @@ class GreatArtist:
             self.bot.frame_counter, self.output_frame_count,
             self.bot.motors.speeds, self.mode_scores))
 
-    def choose_mode(self, reevaluation_interval=2.5, min_speed=1e-4):
+    def choose_mode(self, reevaluation_interval=8.0, min_speed=6e-5):
         scores = list(map(self.evaluate_vibration_mode, range(len(self.bot.vibration_modes))))
         self.mode_scores = scores
         best_mode = 0
@@ -262,10 +262,9 @@ class GreatArtist:
         velocities = ["v[%d] = %r" % (i, self.bot.vibration_modes[i].velocity)
                       for i  in range(len(self.bot.vibration_modes))]
 
-        debug_text = "mode %d, frame %06d\npwm=%r\nscores=%r\n%s" % (
+        debug_text = "mode %d, frame %06d\npwm=%r" % (
             self.bot.current_mode, self.bot.frame_counter,
-            self.bot.motors.speeds, self.mode_scores,
-            '\n'.join(velocities))
+            self.bot.motors.speeds)
 
         draw = ImageDraw.Draw(self.debugview)
         draw.text((1,1), debug_text, font=self.font, fill=255)
@@ -281,7 +280,7 @@ class GreatArtist:
         for i, mode in enumerate(modes):
             self.draw_vibration_mode_line(mode, ((0.08 + i * 0.1), 0.5))
 
-    def draw_vibration_mode_line(self, mode, from_pos, zoom=10, width=1):
+    def draw_vibration_mode_line(self, mode, from_pos, zoom=20, width=1):
         draw = ImageDraw.Draw(self.debugview)
         s = max(*self.debugview.size)
         if from_pos and mode.velocity:
@@ -289,7 +288,7 @@ class GreatArtist:
             draw.line((s*from_pos[0], s*from_pos[1], s*to_pos[0], s*to_pos[1]), fill=255, width=width)
 
     def update_goal(self):
-        sub = ImageMath.eval("convert(i + i/10 - prog - pblur, 'L')", dict(
+        sub = ImageMath.eval("convert(i + i/10 - prog - pblur*2, 'L')", dict(
             i=self.inspiration, prog=self.progress, pblur=self.progress.filter(self.short_blur)))
         long_distance_blur = sub.filter(self.large_blur)
         self.goal = ImageMath.eval("convert(a+b, 'L')", dict(a=sub, b=long_distance_blur))
