@@ -172,7 +172,7 @@ class GreatArtist:
             self.bot.frame_counter, self.output_frame_count,
             self.bot.motors.speeds, self.mode_scores))
 
-    def choose_mode(self, reevaluation_interval=2.5, min_speed=2e-4):
+    def choose_mode(self, reevaluation_interval=2.5, min_speed=5e-4):
         scores = list(map(self.evaluate_vibration_mode, range(len(self.bot.vibration_modes))))
         self.mode_scores = scores
         best_mode = 0
@@ -246,7 +246,7 @@ class GreatArtist:
         self.debugview.putpixel(ipos, 128)
         return self.goal.getpixel(ipos)
 
-    def evaluate_ray(self, vec, weight_multiple=0.02, length_multiple=1.1, num_samples=20):
+    def evaluate_ray(self, vec, weight_multiple=0.01, length_multiple=1.1, num_samples=20):
         """Score a ray starting at the current location, with the given per-frame velocity"""
 
         pos = self.bot.position
