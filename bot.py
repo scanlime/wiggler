@@ -110,7 +110,6 @@ class WiggleBot:
     def increase_minimum_pwm(self):
         self.pwm_initial = min(1.0, self.pwm_initial + self.pwm_initial_increment)
         self.change_mode(self.current_mode)
-        print(self.pwm_initial)
 
     def change_mode(self, mode):
         self.current_mode = mode
@@ -187,11 +186,11 @@ class GreatArtist:
             vel = info.velocity or (0, 0)
             speed_squared = vel[0]*vel[0] + vel[1]*vel[1]
             if speed_squared < min_speed * min_speed:
-                print("velocity forcing mode=%d, speed=%s" % (mode, math.sqrt(speed_squared)))
+                print("velocity bump, mode=%d speed=%s" % (mode, math.sqrt(speed_squared)))
                 self.bot.increase_minimum_pwm()
                 return mode
             if not ts or (now - ts) >= reevaluation_interval:
-                print("timestamp forcing mode=%d, t=%s" % (mode, now - ts))
+                print("timestamp expired, mode=%d t=%s" % (mode, now - ts))
                 return mode
             if score > scores[best_mode]: 
                 best_mode = mode
@@ -222,13 +221,21 @@ class GreatArtist:
 
     def draw_debug_vibration_modes(self):
         mode = self.bot.vibration_modes[self.bot.current_mode]
-        self.draw_vibration_mode_line(mode, self.bot.position, 50, 1)
 
-    def draw_vibration_mode_line(self, mode, from_pos, zoom, width):
+        # Current mode follows the bot
+        self.draw_vibration_mode_line(mode, self.bot.position)
+
+        # Chart per-mode, along the bottom edge from the left
+        self.draw_vibration_mode_line(mode, ((0.08 + self.bot.current_mode * 0.1), 0.5))
+
+    def draw_vibration_mode_line(self, mode, from_pos, zoom=20, width=1):
         draw = ImageDraw.Draw(self.debugview)
         s = max(*self.debugview.size)
         if from_pos and mode.velocity:
             to_pos = (from_pos[0] + mode.velocity[0]*zoom, from_pos[1] + mode.velocity[1]*zoom)
+            # Central dot
+            self.debugview.paste(im=128, box=(int(s*from_pos[0]-1),int(s*from_pos[1]-1),3,3))
+            # Pointy vector
             draw.line((s*from_pos[0], s*from_pos[1], s*to_pos[0], s*to_pos[1]), fill=255, width=width)
 
     def update_goal(self):
