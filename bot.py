@@ -261,14 +261,14 @@ class GreatArtist:
         modes = self.bot.vibration_modes
         current = self.bot.current_mode 
 
-        # Current mode follows the bot
+        # Draw the mode we just chose, folliwng the bot
         self.draw_vibration_mode_line(modes[current], self.bot.position)
 
         # Chart per-mode, along the bottom edge from the left
         for i, mode in enumerate(modes):
             self.draw_vibration_mode_line(mode, ((0.1 + i * 0.5), 0.5))
 
-    def draw_vibration_mode_line(self, mode, from_pos, zoom=20, width=1):
+    def draw_vibration_mode_line(self, mode, from_pos, zoom=50, width=1):
         draw = ImageDraw.Draw(self.debugview)
         s = max(*self.debugview.size)
         if from_pos and mode.velocity:
@@ -276,10 +276,10 @@ class GreatArtist:
             draw.line((s*from_pos[0], s*from_pos[1], s*to_pos[0], s*to_pos[1]), fill=255, width=width)
 
     def update_goal(self):
-        sub = ImageMath.eval("convert(i + i/10 - prog - pblur*2, 'L')", dict(
+        sub = ImageMath.eval("convert(i - prog/3 - pblur/2, 'L')", dict(
             i=self.inspiration, prog=self.progress, pblur=self.progress.filter(self.short_blur)))
         long_distance_blur = sub.filter(self.large_blur)
-        self.goal = ImageMath.eval("convert(a+b, 'L')", dict(a=sub, b=long_distance_blur))
+        self.goal = ImageMath.eval("convert(a/2+b, 'L')", dict(a=sub, b=long_distance_blur))
 
         status_im = Image.merge('RGB', (self.debugview, self.goal, ImageOps.invert(self.progress)))
         self.display.show(status_im)
