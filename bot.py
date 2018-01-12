@@ -131,7 +131,7 @@ class GreatArtist:
         self.mode_scores = None
         self.step_timestamp = None
         self.sample_list = []
-        self.large_blur = ImageFilter.GaussianBlur(max(*self.inspiration.size)//4)
+        self.large_blur = ImageFilter.GaussianBlur(max(*self.inspiration.size)//3)
 
     def run(self):
         try:
@@ -205,8 +205,8 @@ class GreatArtist:
         draw.line((s*from_pos[0], s*from_pos[1], s*to_pos[0], s*to_pos[1]), fill=255, width=2)
 
     def update_goal(self):
-        sub = ImageMath.eval("convert(a-b, 'L')", dict(a=self.inspiration, b=self.progress))
-        long_distance_blur = sub.filter(self.large_blur).filter(self.large_blur)
+        sub = ImageMath.eval("convert(1+a-b/2, 'L')", dict(a=self.inspiration, b=self.progress))
+        long_distance_blur = sub.filter(self.large_blur)
         self.goal = ImageMath.eval("convert(a+b, 'L')", dict(a=sub, b=long_distance_blur))
 
         s = max(*self.debugview.size)
