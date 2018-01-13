@@ -295,12 +295,12 @@ class GreatArtist:
         self.goal_timestamp = time.time()
         self.debugview.paste(im=0, box=(0, 0,)+self.debugview.size)
 
-    def sample_goal(self, pos, border=0, bias=20):
+    def sample_goal(self, pos, border=-1000, bias=96):
         size = self.goal.size
         to_pixels = max(*size)
         ipos = (int(pos[0] * to_pixels), int(pos[1] * to_pixels))
         if ipos[0] < 0 or ipos[0] > size[0]-1 or ipos[1] < 0 or ipos[1] > size[1]-1:
-            return border - bias
+            return border
 
         self.debugview.putpixel(ipos, 128)
         return self.goal.getpixel(ipos) - bias
