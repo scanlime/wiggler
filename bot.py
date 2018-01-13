@@ -10,66 +10,6 @@ from evdev import ecodes
 from PIL import Image, ImageDraw, ImageFilter, ImageMath, ImageOps
 
 
-class Motors:
-    def __init__(self, pi, hz=200):
-        self.pi = pi
-        self.pins = (23, 24, 25)
-        self.count = len(self.pins)
-        for pin in self.pins:
-            self.pi.set_PWM_frequency(pin, hz)
-        self.off()
-
-    def set(self, speeds):
-        self.speeds = tuple(speeds)
-        for speed, pin in zip(self.speeds, self.pins):
-            self.pi.set_PWM_dutycycle(pin, max(0, min(255, int(255 * speed))))
-
-    def off(self):
-        self.set((0,) * self.count)
-
-
-class TabletTx:
-    def __init__(self, pi):
-        self.pi = pi
-        self.set_idle()
-
-    def set_idle(self):
-        self.set_hz(255000)
-
-    def set_hz(self, hz, duty=0.1):
-        self.pi.hardware_PWM(18, hz, int(1e6 * duty))
-
-
-class TabletRx:
-    def __init__(self):
-        for path in evdev.list_devices():
-            dev = evdev.InputDevice(path)
-            caps = dev.capabilities()
-            if ecodes.EV_ABS in caps:
-                absolute = dict(caps[ecodes.EV_ABS])
-                if ecodes.ABS_X in absolute and ecodes.ABS_Y in absolute:
-                    self.x, self.y = (absolute[ecodes.ABS_X], absolute[ecodes.ABS_Y])
-                    self.dev = dev
-                    return
-        raise IOError("Couldn't find the tablet (looking for an input device with ABS_X and ABS_Y)")
-
-    def poll(self):
-        while True:
-            event = self.dev.read_one()
-            if not event:
-                break
-            if event.type == ecodes.EV_ABS:
-                if event.code == ecodes.ABS_X:
-                    self.x = self.x._replace(value=event.value)
-                if event.code == ecodes.ABS_Y:
-                    self.y = self.y._replace(value=event.value)
-
-    def scaled_pos(self):
-        x_size, y_size = (self.x.max - self.x.min, self.y.max - self.y.min)
-        scale = min(1.0 / x_size, 1.0 / y_size)
-        return ((self.x.value - self.x.min) * scale, (self.y.value - self.y.min) * scale)
-
-
 class WiggleBot:
     pwm_initial_increment = 0.05
     pwm_initial_decay = 0.002
@@ -123,49 +63,6 @@ class WiggleBot:
         self.current_mode = mode
         pwm = self.vibration_modes[self.current_mode].pwm
         self.motors.set([p * self.pwm_initial for p in pwm])
-
-
-class Display:
-    def start(self, size):
-        self.size = size
-        self.queue = multiprocessing.Queue(2)
-        self.process = multiprocessing.Process(target=self._proc)
-        self.process.start()
-
-    def show(self, img):
-        try:
-            self.queue.put_nowait(img.tobytes())
-        except queue.Full:
-            pass
-
-    def _proc(self):
-        screen = pygame.display.set_mode(self.size)
-        pygame.display.set_caption('Wiggle Bot')
-        while True:
-            surf = pygame.image.fromstring(self.queue.get(), self.size, 'RGB')
-            screen.blit(surf, dest=(0,0))
-            pygame.display.update()
-
-
-class VideoEncoder:
-    def start(self, filename, size, fps=30, crf=15):
-        self.filename = filename
-        self.fps = fps
-        self.crf = crf
-        self.size = size
-        self.proc = subprocess.Popen([
-            'ffmpeg', '-y',
-            '-pix_fmt', 'rgb24',
-            '-f', 'rawvideo',
-            '-s', '%dx%d' % self.size,
-            '-r', str(self.fps),
-            '-i', '-',
-            '-crf', str(self.crf),
-            self.filename],
-        stdin=subprocess.PIPE)
-
-    def encode(self, img):
-        self.proc.stdin.write(img.tobytes())
 
 
 class GreatArtist:
@@ -355,6 +252,110 @@ class GreatArtist:
         if index == self.bot.current_mode:
             score *= hysteresis
         return score
+
+
+class Motors:
+    def __init__(self, pi, hz=200):
+        self.pi = pi
+        self.pins = (23, 24, 25)
+        self.count = len(self.pins)
+        for pin in self.pins:
+            self.pi.set_PWM_frequency(pin, hz)
+        self.off()
+
+    def set(self, speeds):
+        self.speeds = tuple(speeds)
+        for speed, pin in zip(self.speeds, self.pins):
+            self.pi.set_PWM_dutycycle(pin, max(0, min(255, int(255 * speed))))
+
+    def off(self):
+        self.set((0,) * self.count)
+
+
+class TabletTx:
+    def __init__(self, pi):
+        self.pi = pi
+        self.set_idle()
+
+    def set_idle(self):
+        self.set_hz(255000)
+
+    def set_hz(self, hz, duty=0.1):
+        self.pi.hardware_PWM(18, hz, int(1e6 * duty))
+
+
+class TabletRx:
+    def __init__(self):
+        for path in evdev.list_devices():
+            dev = evdev.InputDevice(path)
+            caps = dev.capabilities()
+            if ecodes.EV_ABS in caps:
+                absolute = dict(caps[ecodes.EV_ABS])
+                if ecodes.ABS_X in absolute and ecodes.ABS_Y in absolute:
+                    self.x, self.y = (absolute[ecodes.ABS_X], absolute[ecodes.ABS_Y])
+                    self.dev = dev
+                    return
+        raise IOError("Couldn't find the tablet (looking for an input device with ABS_X and ABS_Y)")
+
+    def poll(self):
+        while True:
+            event = self.dev.read_one()
+            if not event:
+                break
+            if event.type == ecodes.EV_ABS:
+                if event.code == ecodes.ABS_X:
+                    self.x = self.x._replace(value=event.value)
+                if event.code == ecodes.ABS_Y:
+                    self.y = self.y._replace(value=event.value)
+
+    def scaled_pos(self):
+        x_size, y_size = (self.x.max - self.x.min, self.y.max - self.y.min)
+        scale = min(1.0 / x_size, 1.0 / y_size)
+        return ((self.x.value - self.x.min) * scale, (self.y.value - self.y.min) * scale)
+
+
+class Display:
+    def start(self, size):
+        self.size = size
+        self.queue = multiprocessing.Queue(2)
+        self.process = multiprocessing.Process(target=self._proc)
+        self.process.start()
+
+    def show(self, img):
+        try:
+            self.queue.put_nowait(img.tobytes())
+        except queue.Full:
+            pass
+
+    def _proc(self):
+        screen = pygame.display.set_mode(self.size)
+        pygame.display.set_caption('Wiggle Bot')
+        while True:
+            surf = pygame.image.fromstring(self.queue.get(), self.size, 'RGB')
+            screen.blit(surf, dest=(0,0))
+            pygame.display.update()
+
+
+class VideoEncoder:
+    def start(self, filename, size, fps=30, crf=15):
+        self.filename = filename
+        self.fps = fps
+        self.crf = crf
+        self.size = size
+        self.proc = subprocess.Popen([
+            'ffmpeg', '-y',
+            '-pix_fmt', 'rgb24',
+            '-f', 'rawvideo',
+            '-s', '%dx%d' % self.size,
+            '-r', str(self.fps),
+            '-i', '-',
+            '-crf', str(self.crf),
+            self.filename],
+        stdin=subprocess.PIPE)
+
+    def encode(self, img):
+        self.proc.stdin.write(img.tobytes())
+
 
 if __name__ == "__main__":
     if len(sys.argv) == 2:
