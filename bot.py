@@ -15,7 +15,9 @@ class WiggleBot:
     pwm_initial_decay = 0.002
     pwm_acceleration = 1.012
 
-    def __init__(self, use_combined_modes=True):
+    WiggleMode = collections.namedtuple('WiggleMode', ['pwm', 'velocity', 'timestamp'])
+
+    def __init__(self):
         self.pi = pigpio.pi()
         self.tablet_tx = TabletTx(self.pi)
         self.tablet_rx = TabletRx()
@@ -26,19 +28,19 @@ class WiggleBot:
         self.frame_counter = 0
         self.pwm_initial = 0
 
-        WiggleMode = collections.namedtuple('WiggleMode', ['pwm', 'velocity', 'timestamp'])
+        self.init_modes()
+        self.change_mode(random.randrange(0, len(self.vibration_modes)))
+
+    def init_modes(self, use_combined_modes=True):
         self.vibration_modes = []
         if use_combined_modes:
             for mode_id in range(1, (1 << self.motors.count) - 1):
                 pwm = [(mode_id >> m) & 1 for m in range(self.motors.count)]
-                self.vibration_modes.append(WiggleMode(pwm=pwm, velocity=None, timestamp=None))
+                self.vibration_modes.append(self.WiggleMode(pwm=pwm, velocity=None, timestamp=None))
         else:
             for mode_id in range(self.motors.count):
                 pwm = [(mode_id == m) for m in range(self.motors.count)]
-                self.vibration_modes.append(WiggleMode(pwm=pwm, velocity=None, timestamp=None))
-
-        # Start in a random mode
-        self.change_mode(random.randrange(0, len(self.vibration_modes)))
+                self.vibration_modes.append(self.WiggleMode(pwm=pwm, velocity=None, timestamp=None))
 
     def update(self):
         self.frame_counter += 1
