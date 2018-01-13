@@ -225,11 +225,14 @@ class GreatArtist:
             self.bot.frame_counter, self.output_frame_count,
             self.bot.motors.speeds, self.mode_scores))
 
-    def choose_mode(self, reevaluation_interval=8.0, min_speed=8e-5):
+    def choose_mode(self, reevaluation_interval=3.0, min_speed=8e-5):
         scores = list(map(self.evaluate_vibration_mode, range(len(self.bot.vibration_modes))))
         self.mode_scores = scores
+
         best_mode = 0
+        uncertain_modes = []
         now = time.time()
+
         for mode, score in enumerate(scores):
             info = self.bot.vibration_modes[mode]
             ts = info.timestamp
@@ -238,12 +241,15 @@ class GreatArtist:
             if speed_squared < min_speed * min_speed:
                 print("velocity bump, mode=%d speed=%s" % (mode, math.sqrt(speed_squared)))
                 self.bot.increase_minimum_pwm()
-                return mode
-            if not ts or (now - ts) >= reevaluation_interval:
+                uncertain_modes.append(mode)
+            elif not ts or (now - ts) >= reevaluation_interval:
                 print("timestamp expired, mode=%d t=%s" % (mode, now - ts))
-                return mode
-            if score > scores[best_mode]: 
+                uncertain_modes.append(mode)
+            elif score > scores[best_mode]: 
                 best_mode = mode
+
+        if uncertain_modes:
+            return random.choice(uncertain_modes)
         return best_mode
 
     def record_bot_travel(self, from_pos, to_pos, distance_threshold=0.1):
@@ -266,7 +272,7 @@ class GreatArtist:
 
         # Chart per-mode, along the bottom edge from the left
         for i, mode in enumerate(modes):
-            self.draw_vibration_mode_line(mode, ((0.1 + i * 0.5), 0.5))
+            self.draw_vibration_mode_line(mode, ((0.1 + i * 0.05), 0.5))
 
     def draw_vibration_mode_line(self, mode, from_pos, zoom=50, width=1):
         draw = ImageDraw.Draw(self.debugview)
