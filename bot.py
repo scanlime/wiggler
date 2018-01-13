@@ -72,10 +72,10 @@ class TabletRx:
 
 class WiggleBot:
     pwm_initial_increment = 0.05
-    pwm_initial_decay = 0.001
+    pwm_initial_decay = 0.002
     pwm_acceleration = 1.012
 
-    def __init__(self):
+    def __init__(self, use_combined_modes=True):
         self.pi = pigpio.pi()
         self.tablet_tx = TabletTx(self.pi)
         self.tablet_rx = TabletRx()
@@ -88,9 +88,14 @@ class WiggleBot:
 
         WiggleMode = collections.namedtuple('WiggleMode', ['pwm', 'velocity', 'timestamp'])
         self.vibration_modes = []
-        for mode_id in range(1, (1 << self.motors.count) - 1):
-            pwm = [(mode_id >> m) & 1 for m in range(self.motors.count)]
-            self.vibration_modes.append(WiggleMode(pwm=pwm, velocity=None, timestamp=None))
+        if use_combined_modes:
+            for mode_id in range(1, (1 << self.motors.count) - 1):
+                pwm = [(mode_id >> m) & 1 for m in range(self.motors.count)]
+                self.vibration_modes.append(WiggleMode(pwm=pwm, velocity=None, timestamp=None))
+        else:
+            for mode_id in range(self.motors.count):
+                pwm = [(mode_id == m) for m in range(self.motors.count)]
+                self.vibration_modes.append(WiggleMode(pwm=pwm, velocity=None, timestamp=None))
         self.change_mode(random.randrange(0, self.motors.count))
 
     def update(self):
@@ -224,7 +229,7 @@ class GreatArtist:
         print("frame %06d, output %06d, mode=%d, scores=%r" % (
             self.bot.frame_counter, self.output_frame_count, self.bot.current_mode, self.mode_scores))
 
-    def choose_mode(self, min_speed=1e-4):
+    def choose_mode(self, min_speed=2e-4):
         scores = list(map(self.evaluate_vibration_mode, range(len(self.bot.vibration_modes))))
         self.mode_scores = scores
         best_mode = 0
@@ -256,18 +261,28 @@ class GreatArtist:
         modes = self.bot.vibration_modes
         current = self.bot.current_mode 
 
-        # Draw the mode we just chose, folliwng the bot
+        # Draw the mode we just chose, following the bot
         self.draw_vibration_mode_line(modes[current], self.bot.position)
 
         # Chart per-mode, along the bottom edge from the left
         for i, mode in enumerate(modes):
-            self.draw_vibration_mode_line(mode, ((0.1 + i * 0.05), 0.56))
+            grid = ((0.1 + i * 0.1), 0.1 + 0.02 * int((self.bot.frame_counter % 25)))
+            self.draw_vibration_mode_line(mode, grid, width=(i == self.bot.current_mode)*4)
+
+    def draw_debug_latest_position(self):
+        pos = self.bot.position
+        s = self.major_axis
+        width, height = self.debugview.size
+        self.debugview.paste(im=255, box=(0, int(s*pos[1]), width, int(s*pos[1])+1))
+        self.debugview.paste(im=255, box=(int(s*pos[0]), 0, int(s*pos[0])+1, height))
 
     def draw_vibration_mode_line(self, mode, from_pos, zoom=40, width=1):
         draw = ImageDraw.Draw(self.debugview)
         s = max(*self.debugview.size)
         if from_pos and mode.velocity:
             to_pos = (from_pos[0] + mode.velocity[0]*zoom, from_pos[1] + mode.velocity[1]*zoom)
+            ipos = (int(s*from_pos[0]), int(s*from_pos[1]))
+            self.debugview.paste(im=200, box=(ipos[0]-1, ipos[1]-1, ipos[0]+2, ipos[1]+2))
             draw.line((s*from_pos[0], s*from_pos[1], s*to_pos[0], s*to_pos[1]), fill=255, width=width)
 
     def update_goal(self):
@@ -275,6 +290,8 @@ class GreatArtist:
             i=self.inspiration, prog=self.progress, pblur=self.progress.filter(self.short_blur)))
         long_distance_blur = sub.filter(self.large_blur)
         self.goal = ImageMath.eval("convert(a/2+b, 'L')", dict(a=sub, b=long_distance_blur))
+
+        self.draw_debug_latest_position()
 
         status_im = Image.merge('RGB', (self.debugview, self.goal, ImageOps.invert(self.progress)))
         self.display.show(status_im)
