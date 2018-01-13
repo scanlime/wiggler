@@ -266,7 +266,7 @@ class GreatArtist:
         # Draw the mode we just chose, following the bot
         self.draw_vibration_mode_line(modes[current], self.bot.position)
 
-        # Chart per-mode, along the bottom edge from the left
+        # Grid of vectors, X is mode and Y is modulo time
         for i, mode in enumerate(modes):
             grid = ((0.1 + i * 0.1), 0.1 + 0.02 * int((self.bot.frame_counter % 25)))
             self.draw_vibration_mode_line(mode, grid, width=(i == self.bot.current_mode)*4)
@@ -334,9 +334,8 @@ class GreatArtist:
             pos = (pos[0] + step_vec[0], pos[1] + step_vec[1])
             total += self.sample_goal(pos) * weight
             weight = weight * weight_multiple
-            lma = random.uniform(1.0 - jitter, 1.0 + jitter) * length_multiple
-            lmb = random.uniform(1.0 - jitter, 1.0 + jitter) * length_multiple
-            step_vec = (step_vec[0] * lma, step_vec[1] * lmb)
+            step_vec = (step_vec[0] * random.uniform(1.0 - jitter, 1.0 + jitter) * length_multiple,
+                        step_vec[1] * random.uniform(1.0 - jitter, 1.0 + jitter) * length_multiple)
 
         s = self.major_axis
         draw = ImageDraw.Draw(self.debugview)
