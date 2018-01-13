@@ -342,16 +342,9 @@ class VideoEncoder:
         self.fps = fps
         self.crf = crf
         self.size = size
-        self.proc = subprocess.Popen([
-            'ffmpeg', '-y',
-            '-pix_fmt', 'rgb24',
-            '-f', 'rawvideo',
-            '-s', '%dx%d' % self.size,
-            '-r', str(self.fps),
-            '-i', '-',
-            '-crf', str(self.crf),
-            self.filename],
-        stdin=subprocess.PIPE)
+        self.proc = subprocess.Popen(['ffmpeg', '-y', '-pix_fmt', 'rgb24', '-f', 'rawvideo',
+            '-s', '%dx%d' % self.size, '-r', str(self.fps),
+            '-i', '-', '-crf', str(self.crf), self.filename], stdin=subprocess.PIPE)
 
     def encode(self, img):
         self.proc.stdin.write(img.tobytes())
