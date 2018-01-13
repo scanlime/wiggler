@@ -96,7 +96,9 @@ class WiggleBot:
             for mode_id in range(self.motors.count):
                 pwm = [(mode_id == m) for m in range(self.motors.count)]
                 self.vibration_modes.append(WiggleMode(pwm=pwm, velocity=None, timestamp=None))
-        self.change_mode(random.randrange(0, self.motors.count))
+
+        # Start in a random mode
+        self.change_mode(random.randrange(0, len(self.vibration_modes)))
 
     def update(self):
         self.frame_counter += 1
