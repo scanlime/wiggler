@@ -71,7 +71,7 @@ class TabletRx:
 
 
 class WiggleBot:
-    pwm_initial_increment = 0.01
+    pwm_initial_increment = 0.05
     pwm_initial_decay = 0.001
     pwm_acceleration = 1.012
 
@@ -221,18 +221,13 @@ class GreatArtist:
         self.draw_debug_vibration_modes()
         self.time_step(step_duration)
 
-        print("frame %06d, output %06d, pwm=%r, scores=%r" % (
-            self.bot.frame_counter, self.output_frame_count,
-            self.bot.motors.speeds, self.mode_scores))
+        print("frame %06d, output %06d, mode=%d, scores=%r" % (
+            self.bot.frame_counter, self.output_frame_count, self.bot.current_mode, self.mode_scores))
 
-    def choose_mode(self, reevaluation_interval=3.0, min_speed=8e-5):
+    def choose_mode(self, min_speed=1e-4):
         scores = list(map(self.evaluate_vibration_mode, range(len(self.bot.vibration_modes))))
         self.mode_scores = scores
-
         best_mode = 0
-        uncertain_modes = []
-        now = time.time()
-
         for mode, score in enumerate(scores):
             info = self.bot.vibration_modes[mode]
             ts = info.timestamp
@@ -241,15 +236,9 @@ class GreatArtist:
             if speed_squared < min_speed * min_speed:
                 print("velocity bump, mode=%d speed=%s" % (mode, math.sqrt(speed_squared)))
                 self.bot.increase_minimum_pwm()
-                uncertain_modes.append(mode)
-            elif not ts or (now - ts) >= reevaluation_interval:
-                print("timestamp expired, mode=%d t=%s" % (mode, now - ts))
-                uncertain_modes.append(mode)
-            elif score > scores[best_mode]: 
+                return mode
+            elif score > scores[best_mode]:
                 best_mode = mode
-
-        if uncertain_modes:
-            return random.choice(uncertain_modes)
         return best_mode
 
     def record_bot_travel(self, from_pos, to_pos, distance_threshold=0.1):
@@ -282,7 +271,7 @@ class GreatArtist:
             draw.line((s*from_pos[0], s*from_pos[1], s*to_pos[0], s*to_pos[1]), fill=255, width=width)
 
     def update_goal(self):
-        sub = ImageMath.eval("convert(i + i/10 - prog/2 - pblur/2, 'L')", dict(
+        sub = ImageMath.eval("convert(1 + i + i/10 - prog/2 - pblur/2, 'L')", dict(
             i=self.inspiration, prog=self.progress, pblur=self.progress.filter(self.short_blur)))
         long_distance_blur = sub.filter(self.large_blur)
         self.goal = ImageMath.eval("convert(a/2+b, 'L')", dict(a=sub, b=long_distance_blur))
@@ -340,9 +329,11 @@ class GreatArtist:
 
         return total
 
-    def evaluate_vibration_mode(self, index, hysteresis=1.2):
+    def evaluate_vibration_mode(self, index, hysteresis=1.5, age_modifier=20.0):
         mode = self.bot.vibration_modes[index]
         score = self.evaluate_ray(mode.velocity)
+        age = time.time() - (mode.timestamp or 0)
+        score += age * age_modifier
         if index == self.bot.current_mode:
             score *= hysteresis
         return score
