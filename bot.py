@@ -11,8 +11,8 @@ from PIL import Image, ImageDraw, ImageFilter, ImageMath, ImageOps
 
 
 class WiggleBot:
-    pwm_initial_increment = 0.05
-    pwm_initial_decay = 0.002
+    pwm_initial_increment = 0.01
+    pwm_initial_decay = 0.001
     pwm_acceleration = 1.012
 
     WiggleMode = collections.namedtuple('WiggleMode', ['pwm', 'velocity', 'timestamp'])
@@ -28,21 +28,37 @@ class WiggleBot:
         self.frame_counter = 0
         self.pwm_initial = 0
 
-        self.init_modes()
+        self.init_low_contrast_modes()
         self.change_mode(random.randrange(0, len(self.vibration_modes)))
 
-    def init_modes(self, use_combined_modes=True):
+    def init_single_modes(self):
         self.vibration_modes = []
-        if use_combined_modes:
-            for mode_id in range(1, (1 << self.motors.count) - 1):
-                pwm = [(mode_id >> m) & 1 for m in range(self.motors.count)]
-                self.vibration_modes.append(self.WiggleMode(pwm=pwm, velocity=None, timestamp=None))
-        else:
-            for mode_id in range(self.motors.count):
-                pwm = [(mode_id == m) for m in range(self.motors.count)]
+        for mode_id in range(self.motors.count):
+            pwm = [(mode_id == m) for m in range(self.motors.count)]
+            self.vibration_modes.append(self.WiggleMode(pwm=pwm, velocity=None, timestamp=None))
+
+    def init_low_contrast_modes(self):
+        self.vibration_modes = []
+        for mode_id in range(self.motors.count):
+            pwm = [0.5 + 0.5 * (mode_id == m) for m in range(self.motors.count)]
+            self.vibration_modes.append(self.WiggleMode(pwm=pwm, velocity=None, timestamp=None))
+
+    def init_combined_modes(self):
+        self.vibration_modes = []    
+        for mode_id in range(1, (1 << self.motors.count) - 1):
+            pwm = [(mode_id >> m) & 1 for m in range(self.motors.count)]
+            self.vibration_modes.append(self.WiggleMode(pwm=pwm, velocity=None, timestamp=None))
+
+    def init_pair_modes(self):
+        self.vibration_modes = []
+        for i in range(self.motors.count):
+            for j in range(i+1, self.motors.count):
+                pwm = [0] * self.motors.count
+                pwm[i] = 1
+                pwm[j] = 1
                 self.vibration_modes.append(self.WiggleMode(pwm=pwm, velocity=None, timestamp=None))
 
-    def update(self):
+    def update(self, velocity_smoothing=0.6):
         self.frame_counter += 1
         self.pwm_initial = max(0.0, self.pwm_initial - self.pwm_initial_decay)
         self.tablet_rx.poll()
@@ -50,7 +66,12 @@ class WiggleBot:
         if self.position:
             self.velocity = (position[0] - self.position[0], position[1] - self.position[1])
             m = self.vibration_modes[self.current_mode]
-            m = m._replace(velocity=self.velocity, timestamp=time.time())
+            if m.velocity and self.velocity:
+                smoothed_velocity = (m.velocity[0]*velocity_smoothing + self.velocity[0]*(1-velocity_smoothing),
+                                     m.velocity[1]*velocity_smoothing + self.velocity[1]*(1-velocity_smoothing))
+            else:
+                smoothed_velocity = self.velocity
+            m = m._replace(velocity=smoothed_velocity, timestamp=time.time())
             self.vibration_modes[self.current_mode] = m
         self.position = position
 
@@ -84,7 +105,6 @@ class GreatArtist:
 
         self.major_axis = max(*self.inspiration.size)
         self.large_blur = ImageFilter.GaussianBlur(self.major_axis/4)
-        self.short_blur = ImageFilter.GaussianBlur(self.major_axis/150)
 
         movie_file = time.strftime('bot-%y%m%d-%H%M%S.m4v', time.localtime())
         self.movie.start(movie_file, self.inspiration.size)
@@ -105,7 +125,7 @@ class GreatArtist:
                 time.sleep(delay_needed)
         self.step_timestamp = ts
 
-    def step(self, goal_update_rate=1.0, min_step_duration=1/8, mode_change_delay=1/5):
+    def step(self, goal_update_rate=1.0, min_step_duration=1/4, mode_change_delay=1/5):
         prev_position = self.bot.position
         self.bot.update()
         self.record_bot_travel(prev_position, self.bot.position)
@@ -127,8 +147,9 @@ class GreatArtist:
         self.draw_debug_vibration_modes()
         self.time_step(step_duration)
 
-        print("frame %06d, output %06d, mode=%d, scores=%r" % (
-            self.bot.frame_counter, self.output_frame_count, self.bot.current_mode, self.mode_scores))
+        print("frame %06d, output %06d, mode=%d, pwm=%r, scores=%r" % (
+            self.bot.frame_counter, self.output_frame_count,
+            self.bot.current_mode, self.bot.motors.speeds, self.mode_scores))
 
     def choose_mode(self, min_speed=2e-4):
         scores = list(map(self.evaluate_vibration_mode, range(len(self.bot.vibration_modes))))
@@ -187,10 +208,8 @@ class GreatArtist:
             draw.line((s*from_pos[0], s*from_pos[1], s*to_pos[0], s*to_pos[1]), fill=255, width=width)
 
     def update_goal(self):
-        sub = ImageMath.eval("convert(1 + i + i/10 - prog/2 - pblur/2, 'L')", dict(
-            i=self.inspiration, prog=self.progress, pblur=self.progress.filter(self.short_blur)))
-        long_distance_blur = sub.filter(self.large_blur)
-        self.goal = ImageMath.eval("convert(a/2+b, 'L')", dict(a=sub, b=long_distance_blur))
+        sub = ImageMath.eval("convert(i - prog/2, 'L')", dict(i=self.inspiration, prog=self.progress))
+        self.goal = ImageMath.eval("convert(a/2+b, 'L')", dict(a=sub, b=sub.filter(self.large_blur)))
 
         self.draw_debug_latest_position()
 
@@ -246,7 +265,7 @@ class GreatArtist:
 
         return total
 
-    def evaluate_vibration_mode(self, index, hysteresis=1.5, age_modifier=20.0):
+    def evaluate_vibration_mode(self, index, hysteresis=1.01, age_modifier=0.01):
         mode = self.bot.vibration_modes[index]
         score = self.evaluate_ray(mode.velocity)
         age = time.time() - (mode.timestamp or 0)
