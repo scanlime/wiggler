@@ -1,278 +1,313 @@
 #!/usr/bin/env python3
 
-import time, random, math, sys
+import time, random, math, sys, atexit
 import subprocess, collections, multiprocessing, queue
+import pygame, pigpio, evdev, numpy
+from PIL import Image, ImageOps, ImageMath, ImageFilter, ImageDraw
 
-import pygame
-import pigpio
-import evdev
-from evdev import ecodes
-from PIL import Image, ImageDraw, ImageFilter, ImageMath, ImageOps
+
+class WiggleMode:
+    """One vibration mode (a set of motors we expect to move the bot in a particular way)"""
+
+    velocity_smoothing = 0.5
+
+    def __init__(self, pwm):
+        self.pwm = pwm
+        self.velocity = numpy.array((0,0))
+        self.timestamp = 0
+
+    def update_velocity(self, vec):
+        inv = 1.0 - self.velocity_smoothing
+        self.velocity = self.velocity * self.velocity_smoothing + numpy.array(vec) * inv
+
+
+class WiggleState:
+    """Current state of the bot controller, saved on every timestep"""
+
+    def __init__(self, mode_pwm):
+        self.timestamp = None
+        self.position = None
+        self.velocity = None
+        self.pwm_initial = 0.1
+        self.current_mode = None
+        self.last_mode = None
+        self.mode_change_timestamp = 0
+        self.modes = [WiggleMode(p) for p in mode_pwm]
+        self.frame_counter = 0
+        self.dt_histogram = [0] * 20
+
+    def __repr__(self):
+        return "<frame %06d, pos=%s, mode=%s pwmi=%.1f dthist=%s>" % (
+            self.frame_counter, self.position, self.current_mode, self.pwm_initial, self.dt_histogram)
 
 
 class WiggleBot:
-    pwm_initial_increment = 0.01
-    pwm_initial_decay = 0.001
-    pwm_acceleration = 1.012
+    """Controls the robot motors and reads sensors, navigating based on a goal map.
+       Runs in a separate process which tries to stay in sync with the tablet event rate.
+       """
 
-    WiggleMode = collections.namedtuple('WiggleMode', ['pwm', 'velocity', 'timestamp'])
+    minimum_speed = 1e-2
+    pwm_initial_increment = 1e-4
+    pwm_initial_decay = 1e-5
+    pwm_acceleration = 1.012
+    ray_samples = 32
+    ray_length = 0.7
+    ray_exponent = 1.8
+    ray_edge_penalty = 2.0
+    mode_revisit_period = 6.0
+    minimum_mode_duration = 0.3
 
     def __init__(self):
+        self.goal = None
+        self.goal_queue = multiprocessing.Queue(2)
+        self.state_queue = multiprocessing.Queue(4096)
         self.pi = pigpio.pi()
-        self.tablet_tx = TabletTx(self.pi)
-        self.tablet_rx = TabletRx()
+        self.tablet = TabletLoop(self.pi)
         self.motors = Motors(self.pi)
+        self.state = WiggleState([
+           (1, 0, 0),
+           (0, 1, 0),
+           (0, 0, 1),
+        ])
 
-        self.position = None
-        self.velocity = None
-        self.frame_counter = 0
-        self.pwm_initial = 0
+    def start(self):
+        self.process = multiprocessing.Process(target=self._proc)
+        self.process.start()
 
-        self.init_low_contrast_modes()
-        self.change_mode(random.randrange(0, len(self.vibration_modes)))
+    def _proc(self):
+        # Motor control process
+        while True:
+            self.step()
 
-    def init_single_modes(self):
-        self.vibration_modes = []
-        for mode_id in range(self.motors.count):
-            pwm = [(mode_id == m) for m in range(self.motors.count)]
-            self.vibration_modes.append(self.WiggleMode(pwm=pwm, velocity=None, timestamp=None))
+    def step(self):
+        # Main control loop is driven by tablet event timing; wait for a HID report
+        self.tablet.read()
+        position = self.tablet.rx.scaled_pos()
+        timestamp = self.tablet.rx.timestamp
 
-    def init_low_contrast_modes(self):
-        self.vibration_modes = []
-        for mode_id in range(self.motors.count):
-            pwm = [0.5 + 0.5 * (mode_id == m) for m in range(self.motors.count)]
-            self.vibration_modes.append(self.WiggleMode(pwm=pwm, velocity=None, timestamp=None))
+        # Update instantaneous position and velocity
+        if self.state.position is not None:
+            dt = timestamp - self.state.timestamp
+            diff = position - self.state.position
+            if dt > 0 and diff[0] != 0.0 and diff[1] != 0.0:
+                hist = self.state.dt_histogram
+                hist[min(len(hist)-1, int(dt * 2000))] += 1
+                self.state.velocity = diff / dt
+        self.state.position = position
+        self.state.timestamp = timestamp
+        self.state.frame_counter = self.tablet.frame_counter
 
-    def init_combined_modes(self):
-        self.vibration_modes = []    
-        for mode_id in range(1, (1 << self.motors.count) - 1):
-            pwm = [(mode_id >> m) & 1 for m in range(self.motors.count)]
-            self.vibration_modes.append(self.WiggleMode(pwm=pwm, velocity=None, timestamp=None))
+        # If we haven't desynchronized recently and the tablet was in the same mode
+        # at each end of this step, update the mode-specific smoothed velocity estimate.
+        if (self.state.current_mode is not None
+            and self.state.last_mode == self.state.current_mode
+            and self.state.velocity is not None and self.tablet.is_synchronized()):
+            mode = self.state.modes[self.state.current_mode]
+            mode.timestamp = self.state.timestamp
+            mode.update_velocity(self.state.velocity)
+            self.update_initial_pwm(mode.velocity)
+        self.state.last_mode = self.state.current_mode
 
-    def init_pair_modes(self):
-        self.vibration_modes = []
-        for i in range(self.motors.count):
-            for j in range(i+1, self.motors.count):
-                pwm = [0] * self.motors.count
-                pwm[i] = 1
-                pwm[j] = 1
-                self.vibration_modes.append(self.WiggleMode(pwm=pwm, velocity=None, timestamp=None))
+        # Share the latest state
+        try:
+            self.state_queue.put_nowait(self.state)
+        except queue.Full:
+            print("State queue overflow")
 
-    def update(self, velocity_smoothing=0.6):
-        self.frame_counter += 1
-        self.pwm_initial = max(0.0, self.pwm_initial - self.pwm_initial_decay)
-        self.tablet_rx.poll()
-        position = self.tablet_rx.scaled_pos()
-        if self.position:
-            self.velocity = (position[0] - self.position[0], position[1] - self.position[1])
-            m = self.vibration_modes[self.current_mode]
-            if m.velocity and self.velocity:
-                smoothed_velocity = (m.velocity[0]*velocity_smoothing + self.velocity[0]*(1-velocity_smoothing),
-                                     m.velocity[1]*velocity_smoothing + self.velocity[1]*(1-velocity_smoothing))
-            else:
-                smoothed_velocity = self.velocity
-            m = m._replace(velocity=smoothed_velocity, timestamp=time.time())
-            self.vibration_modes[self.current_mode] = m
-        self.position = position
+        # Get the latest goal map
+        try:
+            while True:
+                self.goal = self.goal_queue.get_nowait()
+        except queue.Empty:
+            pass
+
+        # Change states maybe
+        next_mode = self.choose_mode()
+        if next_mode == self.state.current_mode:
+            self.accelerate()
+        else:
+            self.set_mode(next_mode)
 
     def accelerate(self):
         self.motors.set([min(1.0, s * self.pwm_acceleration) for s in self.motors.speeds])
 
-    def increase_minimum_pwm(self):
-        self.pwm_initial = min(1.0, self.pwm_initial + self.pwm_initial_increment)
-        self.change_mode(self.current_mode)
+    def update_initial_pwm(self, velocity):
+        # Adjust minimum PWM value to maintain minimum speed, using smoothed velocity
+        if velocity.dot(velocity) < self.minimum_speed * self.minimum_speed:
+            self.increase_minimum_pwm()
+        else:
+            self.state.pwm_initial = max(0.0, self.state.pwm_initial - self.pwm_initial_decay)
 
-    def change_mode(self, mode):
-        self.current_mode = mode
-        pwm = self.vibration_modes[self.current_mode].pwm
-        self.motors.set([p * self.pwm_initial for p in pwm])
+    def increase_minimum_pwm(self):
+        self.state.pwm_initial = min(1.0, self.state.pwm_initial + self.pwm_initial_increment)
+        self.set_to_minimum_pwm()
+
+    def set_to_minimum_pwm(self):
+        if self.state.current_mode is not None:
+            pwm = self.state.modes[self.state.current_mode].pwm
+            self.motors.set([p * self.state.pwm_initial for p in pwm])
+
+    def set_mode(self, mode):
+        self.state.current_mode = mode
+        self.state.mode_change_timestamp = self.state.timestamp
+        self.tablet.desync()
+        self.set_to_minimum_pwm()
+
+    def choose_mode(self):
+        # Keep the current mode if it's too soon to change
+        if self.state.timestamp - self.state.mode_change_timestamp < self.minimum_mode_duration:
+            return self.state.current_mode
+
+        # Refresh modes with old velocity estimates, starting with the oldest
+        modes = self.state.modes
+        oldest_mode = 0
+        for i, mode in enumerate(modes):
+            if mode.timestamp < modes[oldest_mode].timestamp:
+                oldest_mode = i
+        if self.state.timestamp - modes[oldest_mode].timestamp > self.mode_revisit_period:
+            return oldest_mode
+
+        # Evaluate rays to find the best choice
+        scores = [self.evaluate_ray(mode.velocity) for mode in modes]
+        best_mode = 0
+        for i, score in enumerate(scores):
+            if score > scores[best_mode]:
+                best_mode = i
+        return best_mode
+
+    def evaluate_ray(self, vec):
+        goal = self.goal
+        if goal is None:
+            return 0
+        position = self.state.position
+        if position is None:
+            return 0
+        if vec is None:
+            return 0
+        norm = numpy.linalg.norm(vec)
+        if norm <= 0.0:
+            return 0
+
+        major_axis = numpy.max(self.goal.shape)
+        origin = major_axis * position
+        direction = vec / norm
+        ray_length = major_axis * self.ray_length
+        samples = numpy.arange(0,1,1/self.ray_samples).reshape((-1,1)) ** self.ray_exponent
+        points = numpy.round(origin + samples * (ray_length * direction)).astype(int)
+        clipped = numpy.clip(points, [0,0], numpy.array(goal.shape) - [1,1])
+        total = numpy.sum(goal[clipped[:,0], clipped[:, 1]])
+        edge_penalty = numpy.linalg.norm(clipped - points)
+        return total - edge_penalty * self.ray_edge_penalty
 
 
 class GreatArtist:
+    """Image-based algorithms for goal determination and status output.
+       The generated goal images are sent to the WiggleBot asynchronously.
+       """
+       
+    frame_delay = 0.5
+
     def __init__(self, inspiration):
         self.bot = WiggleBot()
         self.display = Display()
         self.movie = VideoEncoder()
 
-        self.output_frame_count = 0
         self.inspiration = ImageOps.invert(Image.open(inspiration).convert('L'))
         self.progress = Image.new('L', self.inspiration.size, 0)
         self.debugview = Image.new('L', self.inspiration.size, 0)
+        self.progress_draw = ImageDraw.Draw(self.progress)
+        self.debugview_draw = ImageDraw.Draw(self.debugview)
+
+        self.major_axis = max(*self.inspiration.size)
+        self.large_blur = ImageFilter.GaussianBlur(self.major_axis/4)
+
+        self.frame_counter = 0
         self.goal = None
         self.goal_timestamp = None
         self.mode_scores = None
         self.step_timestamp = None
 
-        self.major_axis = max(*self.inspiration.size)
-        self.large_blur = ImageFilter.GaussianBlur(self.major_axis/4)
-
-        movie_file = time.strftime('bot-%y%m%d-%H%M%S.m4v', time.localtime())
+    def run(self):
+        movie_file = time.strftime('bot-%y%m%d-%H%M%S.mp4', time.localtime())
         self.movie.start(movie_file, self.inspiration.size)
         self.display.start(self.inspiration.size)
+        self.bot.start()
+        while True:
+            self.step()
 
-    def run(self):
-        try:
-            while True:
-                self.step()
-        finally:
-            self.bot.motors.off()
-
-    def time_step(self, step_duration):
-        ts = time.time()
-        if self.step_timestamp:
-            delay_needed = step_duration - (ts - self.step_timestamp)
-            if delay_needed > 0.001:
-                time.sleep(delay_needed)
-        self.step_timestamp = ts
-
-    def step(self, goal_update_rate=1.0, min_step_duration=1/4, mode_change_delay=1/5):
-        prev_position = self.bot.position
-        self.bot.update()
-        self.record_bot_travel(prev_position, self.bot.position)
-
-        step_duration = min_step_duration
-        if self.bot.velocity:
-            if not self.goal:
-                self.update_goal()
-            else:
-                next_mode = self.choose_mode()
-                if next_mode == self.bot.current_mode:
-                    self.bot.accelerate()
-                else:
-                    self.bot.change_mode(next_mode)
-                    step_duration += mode_change_delay
-                    if not self.goal_timestamp or time.time() - self.goal_timestamp > goal_update_rate:
-                        self.update_goal()
-
-        self.draw_debug_vibration_modes()
-        self.time_step(step_duration)
-
-        print("frame %06d, output %06d, mode=%d, pwm=%r, scores=%r" % (
-            self.bot.frame_counter, self.output_frame_count,
-            self.bot.current_mode, self.bot.motors.speeds, self.mode_scores))
-
-    def choose_mode(self, min_speed=2e-4):
-        scores = list(map(self.evaluate_vibration_mode, range(len(self.bot.vibration_modes))))
-        self.mode_scores = scores
-        best_mode = 0
-        for mode, score in enumerate(scores):
-            info = self.bot.vibration_modes[mode]
-            ts = info.timestamp
-            vel = info.velocity or (0, 0)
-            speed_squared = vel[0]*vel[0] + vel[1]*vel[1]
-            if speed_squared < min_speed * min_speed:
-                print("velocity bump, mode=%d speed=%s" % (mode, math.sqrt(speed_squared)))
-                self.bot.increase_minimum_pwm()
-                return mode
-            elif score > scores[best_mode]:
-                best_mode = mode
-        return best_mode
-
-    def record_bot_travel(self, from_pos, to_pos, distance_threshold=0.1):
-        if not from_pos or not to_pos:
-            return
-        distance_squared = math.pow(to_pos[0] - from_pos[0], 2) + math.pow(to_pos[1] - from_pos[1], 2)
-        if distance_squared > math.pow(distance_threshold, 2):
-            return
-
-        s = self.major_axis
-        draw = ImageDraw.Draw(self.progress)
-        draw.line((s*from_pos[0], s*from_pos[1], s*to_pos[0], s*to_pos[1]), fill=255, width=1)
-
-    def draw_debug_vibration_modes(self):
-        modes = self.bot.vibration_modes
-        current = self.bot.current_mode 
-
-        # Draw the mode we just chose, following the bot
-        self.draw_vibration_mode_line(modes[current], self.bot.position)
-
-        # Grid of vectors, X is mode and Y is modulo time
-        for i, mode in enumerate(modes):
-            grid = ((0.1 + i * 0.1), 0.1 + 0.02 * int((self.bot.frame_counter % 25)))
-            self.draw_vibration_mode_line(mode, grid, width=(i == self.bot.current_mode)*4)
-
-    def draw_debug_latest_position(self):
-        pos = self.bot.position
-        s = self.major_axis
-        width, height = self.debugview.size
-        self.debugview.paste(im=255, box=(0, int(s*pos[1]), width, int(s*pos[1])+1))
-        self.debugview.paste(im=255, box=(int(s*pos[0]), 0, int(s*pos[0])+1, height))
-
-    def draw_vibration_mode_line(self, mode, from_pos, zoom=40, width=1):
-        draw = ImageDraw.Draw(self.debugview)
-        s = max(*self.debugview.size)
-        if from_pos and mode.velocity:
-            to_pos = (from_pos[0] + mode.velocity[0]*zoom, from_pos[1] + mode.velocity[1]*zoom)
-            ipos = (int(s*from_pos[0]), int(s*from_pos[1]))
-            self.debugview.paste(im=200, box=(ipos[0]-1, ipos[1]-1, ipos[0]+2, ipos[1]+2))
-            draw.line((s*from_pos[0], s*from_pos[1], s*to_pos[0], s*to_pos[1]), fill=255, width=width)
-
-    def update_goal(self):
+    def step(self):
+        # Compute and send a new goal image
         sub = ImageMath.eval("convert(i - prog/2, 'L')", dict(i=self.inspiration, prog=self.progress))
         self.goal = ImageMath.eval("convert(a/2+b, 'L')", dict(a=sub, b=sub.filter(self.large_blur)))
+        self.bot.goal_queue.put(numpy.asarray(self.goal))
 
+        # Drain the queue of incoming states from the bot control process
+        try:
+            while True:
+                prev_pos = self.bot.state.position
+                self.bot.state = self.bot.state_queue.get_nowait()
+                self.record_bot_travel(prev_pos, self.bot.state.position)
+                self.draw_debug_vibration_modes()
+        except queue.Empty:
+            pass
+
+        # Update the output images
         self.draw_debug_latest_position()
-
         status_im = Image.merge('RGB', (self.debugview, self.goal, ImageOps.invert(self.progress)))
         self.display.show(status_im)
         self.movie.encode(status_im)
 
-        self.output_frame_count += 1
-        self.goal_timestamp = time.time()
+        self.frame_counter += 1
         self.debugview.paste(im=0, box=(0, 0,)+self.debugview.size)
 
-    def sample_goal(self, pos, border=-1000, bias=128, gamma=1.8):
-        size = self.goal.size
-        to_pixels = max(*size)
-        ipos = (int(pos[0] * to_pixels), int(pos[1] * to_pixels))
-        if ipos[0] < 0 or ipos[0] > size[0]-1 or ipos[1] < 0 or ipos[1] > size[1]-1:
-            return border
+        print("[%06d] %r" % (self.frame_counter, self.bot.state))
+        time.sleep(self.frame_delay)
 
-        self.debugview.putpixel(ipos, 128)
-        p = self.goal.getpixel(ipos) - bias
-        if p > 0:
-            return math.pow(p, gamma)
-        else:
-            return -math.pow(-p, gamma)
-
-    def evaluate_ray(self, vec, weight_multiple=0.1, length_multiple=1.3, num_samples=10, jitter=0.3):
-        pos = self.bot.position
-        total = 0
-        weight = 1.0
-        step_length = 1.0 / min(*self.goal.size)
-
-        if not vec:
-            return 0
-        vec_len = math.sqrt(math.pow(vec[0], 2) + math.pow(vec[1], 2))
-        if vec_len <= 0:
-            return 0
-        step_vec = (vec[0] * step_length / vec_len, vec[1] * step_length / vec_len)
-
-        for i in range(num_samples):
-            pos = (pos[0] + step_vec[0], pos[1] + step_vec[1])
-            total += self.sample_goal(pos) * weight
-            weight = weight * weight_multiple
-            step_vec = (step_vec[0] * random.uniform(1.0 - jitter, 1.0 + jitter) * length_multiple,
-                        step_vec[1] * random.uniform(1.0 - jitter, 1.0 + jitter) * length_multiple)
+    def record_bot_travel(self, from_pos, to_pos, distance_threshold=0.1):
+        if from_pos is None or to_pos is None:
+            return
+        dist = to_pos - from_pos
+        if dist.dot(dist) > distance_threshold * distance_threshold:
+            # Ignore large jumps
+            return
 
         s = self.major_axis
-        draw = ImageDraw.Draw(self.debugview)
-        ipos = (int(s*pos[0]), int(s*pos[1]))
-        label = "%.1f" % total
-        textsize = draw.textsize(label)
-        self.debugview.paste(im=0, box=(ipos[0], ipos[1], ipos[0]+textsize[0], ipos[1]+textsize[1]))
-        draw.text(ipos, label, fill=180)
+        self.progress_draw.line((s*from_pos[0], s*from_pos[1],
+            s*to_pos[0], s*to_pos[1]), fill=255, width=1)
 
-        return total
+    def draw_debug_vibration_modes(self):
+        modes = self.bot.state.modes
+        current = self.bot.state.current_mode 
 
-    def evaluate_vibration_mode(self, index, hysteresis=1.01, age_modifier=0.01):
-        mode = self.bot.vibration_modes[index]
-        score = self.evaluate_ray(mode.velocity)
-        age = time.time() - (mode.timestamp or 0)
-        score += age * age_modifier
-        if index == self.bot.current_mode:
-            score *= hysteresis
-        return score
+        for mode in modes:
+            # Follow the bot with all available vectors
+            self.draw_vibration_mode_line(mode, self.bot.state.position)
+
+        if current is not None:
+
+            # Oscilloscope trace for current mode
+            x = self.bot.state.frame_counter % self.debugview.size[0]
+            y = current
+            self.debugview.paste(im=255, box=(x, y*4, x+1, (y+1)*4))
+
+            # Oscilloscope trace for vectors; X is time, Y is mode
+            grid = ((0.004 * self.bot.state.frame_counter) % 1.0, (2+current) * 0.05)
+            self.draw_vibration_mode_line(modes[current], grid)
+
+    def draw_debug_latest_position(self):
+        pos = self.bot.state.position
+        if pos is not None:
+            s = self.major_axis
+            width, height = self.debugview.size
+            self.debugview.paste(im=255, box=(0, int(s*pos[1]), width, int(s*pos[1])+1))
+            self.debugview.paste(im=255, box=(int(s*pos[0]), 0, int(s*pos[0])+1, height))
+
+    def draw_vibration_mode_line(self, mode, from_pos, zoom=2.0, width=1):
+        s = max(*self.debugview.size)
+        if from_pos is not None and mode.velocity is not None:
+            to_pos = (from_pos[0] + mode.velocity[0]*zoom, from_pos[1] + mode.velocity[1]*zoom)
+            ipos = (int(s*from_pos[0]), int(s*from_pos[1]))
+            self.debugview_draw.line((s*from_pos[0], s*from_pos[1], s*to_pos[0], s*to_pos[1]), fill=255, width=width)
 
 
 class Motors:
@@ -283,6 +318,7 @@ class Motors:
         for pin in self.pins:
             self.pi.set_PWM_frequency(pin, hz)
         self.off()
+        atexit.register(self.off)
 
     def set(self, speeds):
         self.speeds = tuple(speeds)
@@ -293,13 +329,37 @@ class Motors:
         self.set((0,) * self.count)
 
 
+class TabletLoop:
+    def __init__(self, pi):
+        self.tx = TabletTx(pi)
+        self.rx = TabletRx()
+        self.toggle = False
+        self.frame_counter = 0
+
+    def read(self):
+        self.rx.sync_read()
+        self.frame_counter = self.frame_counter + 1
+        self.update_pressure()
+
+    def desync(self):
+        if self.is_synchronized(): 
+            self.toggle = not self.toggle
+            self.update_pressure()
+
+    def is_synchronized(self):
+        return (self.rx.get_pressure() > 0.3) == self.toggle
+
+    def update_pressure(self):
+        anti_idleness_ramp = (self.frame_counter & 7) / 7 - 0.5
+        self.tx.set_pressure(0.1 + 0.7 * float(self.toggle) + 0.05 * anti_idleness_ramp)
+
+
 class TabletTx:
     def __init__(self, pi):
         self.pi = pi
-        self.set_idle()
 
-    def set_idle(self):
-        self.set_hz(255000)
+    def set_pressure(self, p):
+        self.set_hz(int(255000 + max(0.0, min(1.0, p)) * 9000))
 
     def set_hz(self, hz, duty=0.1):
         self.pi.hardware_PWM(18, hz, int(1e6 * duty))
@@ -307,32 +367,38 @@ class TabletTx:
 
 class TabletRx:
     def __init__(self):
+        ABS = evdev.ecodes.EV_ABS
+        X, Y, P = evdev.ecodes.ABS_X, evdev.ecodes.ABS_Y, evdev.ecodes.ABS_PRESSURE
         for path in evdev.list_devices():
             dev = evdev.InputDevice(path)
             caps = dev.capabilities()
-            if ecodes.EV_ABS in caps:
-                absolute = dict(caps[ecodes.EV_ABS])
-                if ecodes.ABS_X in absolute and ecodes.ABS_Y in absolute:
-                    self.x, self.y = (absolute[ecodes.ABS_X], absolute[ecodes.ABS_Y])
+            if ABS in caps:
+                ab = dict(caps[ABS])
+                if X in ab and Y in ab and P in ab:
+                    self.x, self.y, self.p = (ab[X], ab[Y], ab[P])
+                    self.timestamp = 0
                     self.dev = dev
                     return
-        raise IOError("Couldn't find the tablet (looking for an input device with ABS_X and ABS_Y)")
+        raise IOError("Couldn't find the tablet (looking for an input device with X, Y, and Pressure)")
 
-    def poll(self):
-        while True:
-            event = self.dev.read_one()
-            if not event:
+    def sync_read(self):
+        SYN, ABS = evdev.ecodes.EV_SYN, evdev.ecodes.EV_ABS
+        X, Y, P = evdev.ecodes.ABS_X, evdev.ecodes.ABS_Y, evdev.ecodes.ABS_PRESSURE
+        for ev in self.dev.read_loop():
+            if ev.type == SYN:
+                self.timestamp = ev.timestamp()
                 break
-            if event.type == ecodes.EV_ABS:
-                if event.code == ecodes.ABS_X:
-                    self.x = self.x._replace(value=event.value)
-                if event.code == ecodes.ABS_Y:
-                    self.y = self.y._replace(value=event.value)
+            if ev.type == ABS:
+                if ev.code == X: self.x = self.x._replace(value=ev.value)
+                if ev.code == Y: self.y = self.y._replace(value=ev.value)
+                if ev.code == P: self.p = self.p._replace(value=ev.value)
 
     def scaled_pos(self):
-        x_size, y_size = (self.x.max - self.x.min, self.y.max - self.y.min)
-        scale = min(1.0 / x_size, 1.0 / y_size)
-        return ((self.x.value - self.x.min) * scale, (self.y.value - self.y.min) * scale)
+        s = 1.0 / max(self.x.max - self.x.min, self.y.max - self.y.min)
+        return numpy.array((s * (self.x.value - self.x.min), s * (self.y.value - self.y.min)))
+
+    def get_pressure(self):
+        return (self.p.value - self.p.min) / (self.p.max - self.p.min)
 
 
 class Display:
@@ -358,14 +424,15 @@ class Display:
 
 
 class VideoEncoder:
-    def start(self, filename, size, fps=30, crf=15):
+    def start(self, filename, size, fps=30, crf=15, zoom=2):
         self.filename = filename
         self.fps = fps
         self.crf = crf
         self.size = size
+        filters = 'scale=%dx%d:flags=neighbor' % (size[0]*zoom, size[1]*zoom)
         self.proc = subprocess.Popen(['ffmpeg', '-y', '-pix_fmt', 'rgb24', '-f', 'rawvideo',
             '-s', '%dx%d' % self.size, '-r', str(self.fps),
-            '-i', '-', '-crf', str(self.crf), self.filename], stdin=subprocess.PIPE)
+            '-i', '-', '-crf', str(self.crf), '-vf', filters, self.filename], stdin=subprocess.PIPE)
 
     def encode(self, img):
         self.proc.stdin.write(img.tobytes())
