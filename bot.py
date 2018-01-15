@@ -21,10 +21,10 @@ class WiggleBot:
     ray_length = 0.7
     ray_shape_exponent = 6.0
     ray_edge_penalty = 0.1
-    ray_sample_bias = 20
+    ray_sample_bias = 96
     ray_sample_exponent = 2.0
-    mode_revisit_period = 4.0
-    minimum_mode_duration = 0.15
+    mode_revisit_period = 3.0
+    minimum_mode_duration = 0.25
 
     mode_pwm = [
         (1, 0, 0),
@@ -33,7 +33,6 @@ class WiggleBot:
         (0, 1, 1),
         (1, 0, 1),
         (1, 1, 0),
-        (1, 1, 1),
     ]
 
     def __init__(self):
@@ -248,7 +247,7 @@ class GreatArtist:
         self.debugview_draw = ImageDraw.Draw(self.debugview)
 
         self.major_axis = max(*self.inspiration.size)
-        self.large_blur = ImageFilter.GaussianBlur(96)
+        self.large_blur = ImageFilter.GaussianBlur(32)
 
         self.frame_counter = 0
         self.goal = None
@@ -309,13 +308,10 @@ class GreatArtist:
             # Follow the bot with all available vectors
             self.draw_vibration_mode_line(mode, self.bot.state.position)
 
-        # Trace current frame, along bottom of screen
-        w, h = self.debugview.size
-        frame_x = self.bot.state.frame_counter % w
-        self.debugview.paste(im=255, box=(frame_x, h-4, frame_x+1, h))
-
         if current is not None:
             # Oscilloscope trace for current mode
+            w, h = self.debugview.size
+            frame_x = self.bot.state.frame_counter % w
             self.debugview.paste(im=255, box=(frame_x, current*4, frame_x+1, (current+1)*4))
 
             # Oscilloscope trace for vectors; X is time, Y is mode
