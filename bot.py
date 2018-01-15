@@ -6,63 +6,34 @@ import pygame, pigpio, evdev, numpy
 from PIL import Image, ImageOps, ImageMath, ImageFilter, ImageDraw
 
 
-class WiggleMode:
-    """One vibration mode (a set of motors we expect to move the bot in a particular way)"""
-
-    velocity_smoothing = 0.5
-
-    def __init__(self, pwm):
-        self.pwm = pwm
-        self.velocity = numpy.array((0,0))
-        self.timestamp = 0
-
-    def update_velocity(self, vec):
-        inv = 1.0 - self.velocity_smoothing
-        self.velocity = self.velocity * self.velocity_smoothing + numpy.array(vec) * inv
-
-
-class WiggleState:
-    """Current state of the bot controller, saved on every timestep"""
-
-    def __init__(self, mode_pwm, pwm_initial):
-        self.timestamp = None
-        self.position = None
-        self.velocity = None
-        self.pwm_initial = pwm_initial
-        self.current_mode = None
-        self.last_mode = None
-        self.mode_change_timestamp = 0
-        self.modes = [WiggleMode(p) for p in mode_pwm]
-        self.frame_counter = 0
-        self.dt_histogram = [0] * 20
-
-    def __repr__(self):
-        return "<frame %06d, pos=%s, mode=%s pwmi=%.3f dthist=%s>" % (
-            self.frame_counter, self.position, self.current_mode, self.pwm_initial, self.dt_histogram)
-
-
 class WiggleBot:
     """Controls the robot motors and reads sensors, navigating based on a goal map.
        Runs in a separate process which tries to stay in sync with the tablet event rate.
        """
 
-    minimum_speed = 1e-2
-    pwm_initial_startup = 0.2
-    pwm_initial_increment = 1e-5
-    pwm_initial_decay = 1e-6
+    minimum_speed = 0.04
+    velocity_smoothing = 0.94
+    pwm_initial_startup = 0.25
+    pwm_initial_increment = 0
+    pwm_initial_decay = 0
     pwm_acceleration = 1.012
     ray_samples = 32
     ray_length = 0.7
-    ray_exponent = 1.8
+    ray_shape_exponent = 6.0
     ray_edge_penalty = 0.1
     ray_sample_bias = 20
-    ray_sample_exponent = 1.8
-    mode_revisit_period = 20.0
-    minimum_mode_duration = 0.4
+    ray_sample_exponent = 2.0
+    mode_revisit_period = 4.0
+    minimum_mode_duration = 0.15
+
     mode_pwm = [
         (1, 0, 0),
         (0, 1, 0),
         (0, 0, 1),
+        (0, 1, 1),
+        (1, 0, 1),
+        (1, 1, 0),
+        (1, 1, 1),
     ]
 
     def __init__(self):
@@ -119,8 +90,9 @@ class WiggleBot:
             and self.state.velocity is not None and self.tablet.is_synchronized()):
             mode = self.state.modes[self.state.current_mode]
             mode.timestamp = self.state.timestamp
-            mode.update_velocity(self.state.velocity)
-            self.update_initial_pwm(mode.velocity)
+            mode.update_velocity(self.state.velocity, self.velocity_smoothing)
+            if mode.timestamp - self.state.mode_change_timestamp > self.minimum_mode_duration:
+                self.update_initial_pwm(mode.velocity)
         self.state.last_mode = self.state.current_mode
 
         # Share the latest state
@@ -144,7 +116,9 @@ class WiggleBot:
         self.motors.set([min(1.0, s * self.pwm_acceleration) for s in self.motors.speeds])
 
     def update_initial_pwm(self, velocity):
-        # Adjust minimum PWM value to maintain minimum speed, using smoothed velocity
+        # Adjust minimum PWM value to maintain minimum speed.
+        # Called with smoothed velocity after a mode is old enough to switch.
+        
         if velocity.dot(velocity) < self.minimum_speed * self.minimum_speed:
             self.increase_minimum_pwm()
         else:
@@ -166,6 +140,8 @@ class WiggleBot:
         self.set_to_minimum_pwm()
 
     def choose_mode(self):
+        self.state.ray_debug_info = []
+
         # Keep the current mode if it's too soon to change
         if self.state.timestamp - self.state.mode_change_timestamp < self.minimum_mode_duration:
             return self.state.current_mode
@@ -180,8 +156,12 @@ class WiggleBot:
             return oldest_mode
 
         # Evaluate rays to find the best choice
-        scores = [self.evaluate_ray(mode.velocity) for mode in modes]
+        scores = []
         best_mode = 0
+        for mode in modes:
+            ray_info = self.evaluate_ray(mode.velocity)
+            self.state.ray_debug_info.append(ray_info)
+            scores.append(ray_info[0])
         for i, score in enumerate(scores):
             if score > scores[best_mode]:
                 best_mode = i
@@ -190,27 +170,63 @@ class WiggleBot:
     def evaluate_ray(self, vec):
         goal = self.goal
         if goal is None:
-            return 0
+            return (0, dict(error='no_goal_yet'))
         position = self.state.position
         if position is None:
-            return 0
+            return (0, dict(error='no_position_yet'))
         if vec is None:
-            return 0
+            return (0, dict(error='no_input_yet'))
         norm = numpy.linalg.norm(vec)
         if norm <= 0.0:
-            return 0
+            return (0, dict(error='input_vec_zero'))
 
+        height, width = self.goal.shape
         major_axis = numpy.max(self.goal.shape)
+
         origin = major_axis * position
         direction = vec / norm
         ray_length = major_axis * self.ray_length
-        sample_locs = numpy.arange(0,1,1/self.ray_samples).reshape((-1,1)) ** self.ray_exponent
+        sample_locs = numpy.arange(0,1,1/self.ray_samples).reshape((-1,1)) ** self.ray_shape_exponent
         points = numpy.round(origin + sample_locs * (ray_length * direction)).astype(int)
-        clipped = numpy.clip(points, [0,0], numpy.array(goal.shape) - [1,1])
-        samples = self.ray_sample_bias + goal[clipped[:,0], clipped[:, 1]] ** self.ray_sample_exponent
+        clipped = numpy.clip(points, (0,0), (width-1, height-1))
+        samples = self.ray_sample_bias + goal[clipped[:,1], clipped[:,0]] ** self.ray_sample_exponent
         total = numpy.linalg.norm(samples)
         edge_penalty = numpy.linalg.norm(clipped - points)
-        return total - edge_penalty * self.ray_edge_penalty
+        score = total - edge_penalty * self.ray_edge_penalty
+        return (score, dict(clipped_points=clipped))
+
+
+class WiggleMode:
+    """One vibration mode (a set of motors we expect to move the bot in a particular way)"""
+
+    def __init__(self, pwm):
+        self.pwm = pwm
+        self.velocity = numpy.array((0,0))
+        self.timestamp = 0
+
+    def update_velocity(self, vec, smoothing):
+        self.velocity = self.velocity * smoothing + numpy.array(vec) * (1-smoothing)
+    
+
+class WiggleState:
+    """Current state of the bot controller, saved on every timestep"""
+
+    def __init__(self, mode_pwm, pwm_initial):
+        self.timestamp = None
+        self.position = None
+        self.velocity = None
+        self.pwm_initial = pwm_initial
+        self.ray_debug_info = []
+        self.current_mode = None
+        self.last_mode = None
+        self.mode_change_timestamp = 0
+        self.modes = [WiggleMode(p) for p in mode_pwm]
+        self.frame_counter = 0
+        self.dt_histogram = [0] * 20
+
+    def __repr__(self):
+        return "<frame %06d, pos=%s, mode=%s pwmi=%.6f dthist=%s>" % (
+            self.frame_counter, self.position, self.current_mode, self.pwm_initial, self.dt_histogram)
 
 
 class GreatArtist:
@@ -259,7 +275,7 @@ class GreatArtist:
             prev_pos = self.bot.state.position
             self.bot.state = self.bot.state_rx.recv()
             self.record_bot_travel(prev_pos, self.bot.state.position)
-            self.draw_debug_vibration_modes()
+            self.draw_per_state_debug()
 
         # Update the output images
         self.draw_debug_latest_position()
@@ -285,7 +301,7 @@ class GreatArtist:
         self.progress_draw.line((s*from_pos[0], s*from_pos[1],
             s*to_pos[0], s*to_pos[1]), fill=255, width=1)
 
-    def draw_debug_vibration_modes(self):
+    def draw_per_state_debug(self):
         modes = self.bot.state.modes
         current = self.bot.state.current_mode 
 
@@ -305,6 +321,11 @@ class GreatArtist:
             # Oscilloscope trace for vectors; X is time, Y is mode
             grid = ((0.004 * self.bot.state.frame_counter) % 1.0, (2+current) * 0.05)
             self.draw_vibration_mode_line(modes[current], grid)
+
+        # Per-ray debugging from this state
+        for score, ray_info in self.bot.state.ray_debug_info:
+            for pt in ray_info.get('clipped_points', []):
+                self.debugview.putpixel(pt, 180)
 
     def draw_debug_latest_position(self):
         pos = self.bot.state.position
