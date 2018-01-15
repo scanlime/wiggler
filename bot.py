@@ -28,7 +28,7 @@ class WiggleState:
         self.timestamp = None
         self.position = None
         self.velocity = None
-        self.pwm_initial = 0.1
+        self.pwm_initial = 0
         self.current_mode = None
         self.last_mode = None
         self.mode_change_timestamp = 0
@@ -53,9 +53,11 @@ class WiggleBot:
     ray_samples = 32
     ray_length = 0.7
     ray_exponent = 1.8
-    ray_edge_penalty = 2.0
-    mode_revisit_period = 6.0
-    minimum_mode_duration = 0.3
+    ray_edge_penalty = 0.1
+    ray_sample_bias = 20
+    ray_sample_exponent = 1.8
+    mode_revisit_period = 20.0
+    minimum_mode_duration = 0.4
 
     def __init__(self):
         self.goal = None
@@ -192,10 +194,11 @@ class WiggleBot:
         origin = major_axis * position
         direction = vec / norm
         ray_length = major_axis * self.ray_length
-        samples = numpy.arange(0,1,1/self.ray_samples).reshape((-1,1)) ** self.ray_exponent
-        points = numpy.round(origin + samples * (ray_length * direction)).astype(int)
+        sample_locs = numpy.arange(0,1,1/self.ray_samples).reshape((-1,1)) ** self.ray_exponent
+        points = numpy.round(origin + sample_locs * (ray_length * direction)).astype(int)
         clipped = numpy.clip(points, [0,0], numpy.array(goal.shape) - [1,1])
-        total = numpy.sum(goal[clipped[:,0], clipped[:, 1]])
+        samples = self.ray_sample_bias + goal[clipped[:,0], clipped[:, 1]] ** self.ray_sample_exponent
+        total = numpy.linalg.norm(samples)
         edge_penalty = numpy.linalg.norm(clipped - points)
         return total - edge_penalty * self.ray_edge_penalty
 
@@ -219,7 +222,7 @@ class GreatArtist:
         self.debugview_draw = ImageDraw.Draw(self.debugview)
 
         self.major_axis = max(*self.inspiration.size)
-        self.large_blur = ImageFilter.GaussianBlur(self.major_axis/4)
+        self.large_blur = ImageFilter.GaussianBlur(96)
 
         self.frame_counter = 0
         self.goal = None
@@ -335,6 +338,7 @@ class TabletLoop:
         self.rx = TabletRx()
         self.toggle = False
         self.frame_counter = 0
+        self.update_pressure()
 
     def read(self):
         self.rx.sync_read()
@@ -355,30 +359,42 @@ class TabletLoop:
 
 
 class TabletTx:
+    idle_hz = 255000
+
     def __init__(self, pi):
         self.pi = pi
+        atexit.register(self.off)
 
     def set_pressure(self, p):
-        self.set_hz(int(255000 + max(0.0, min(1.0, p)) * 9000))
+        self.set_hz(int(self.idle_hz + max(0.0, min(1.0, p)) * 9000))
 
     def set_hz(self, hz, duty=0.1):
         self.pi.hardware_PWM(18, hz, int(1e6 * duty))
 
+    def off(self):
+        self.set_hz(self.idle_hz, 0)
+
 
 class TabletRx:
+    """Receive low-level tablet events via the Linux Event subsystem"""
+
     def __init__(self):
         ABS = evdev.ecodes.EV_ABS
         X, Y, P = evdev.ecodes.ABS_X, evdev.ecodes.ABS_Y, evdev.ecodes.ABS_PRESSURE
         for path in evdev.list_devices():
             dev = evdev.InputDevice(path)
             caps = dev.capabilities()
-            if ABS in caps:
-                ab = dict(caps[ABS])
-                if X in ab and Y in ab and P in ab:
-                    self.x, self.y, self.p = (ab[X], ab[Y], ab[P])
-                    self.timestamp = 0
-                    self.dev = dev
-                    return
+            if ABS not in caps:
+                continue
+            ab = dict(caps[ABS])
+            if X in ab and Y in ab and P in ab:
+                self.x, self.y, self.p = (ab[X], ab[Y], ab[P])
+                self.timestamp = 0
+                self.dev = dev
+                print("Using device as tablet:", dev)
+                dev.grab()
+                atexit.register(dev.ungrab)
+                return
         raise IOError("Couldn't find the tablet (looking for an input device with X, Y, and Pressure)")
 
     def sync_read(self):
