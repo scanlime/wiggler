@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
-import time, random, math, sys, atexit
-import subprocess, collections, multiprocessing, queue
+import time, random, math, sys, queue
+import subprocess, collections, multiprocessing
 import pygame, pigpio, evdev, numpy
 from PIL import Image, ImageOps, ImageMath, ImageFilter, ImageDraw
 
@@ -66,22 +66,33 @@ class WiggleBot:
     ]
 
     def __init__(self):
-        self.goal = None
-        self.goal_queue = multiprocessing.Queue(2)
-        self.state_queue = multiprocessing.Queue(4096)
-        self.pi = pigpio.pi()
-        self.tablet = TabletLoop(self.pi)
-        self.motors = Motors(self.pi)
         self.state = WiggleState(self.mode_pwm, self.pwm_initial_startup)
 
     def start(self):
+        self.goal_queue = multiprocessing.Queue(2)
+        self.state_rx, self.state_tx = multiprocessing.Pipe(False)
         self.process = multiprocessing.Process(target=self._proc)
         self.process.start()
 
     def _proc(self):
         # Motor control process
-        while True:
-            self.step()
+
+        self.goal = None
+        self.pi = pigpio.pi()
+        self.tablet = TabletLoop(self.pi)
+        self.motors = Motors(self.pi)
+
+        try:
+            while True:
+                self.step()
+        finally:
+            self.shutdown()
+            
+    def shutdown(self):
+        # self.pi might be locked
+        pi = pigpio.pi()
+        Motors(pi).off()
+        TabletTx(pi).off()
 
     def step(self):
         # Main control loop is driven by tablet event timing; wait for a HID report
@@ -113,10 +124,7 @@ class WiggleBot:
         self.state.last_mode = self.state.current_mode
 
         # Share the latest state
-        try:
-            self.state_queue.put_nowait(self.state)
-        except queue.Full:
-            print("State queue overflow")
+        self.state_tx.send(self.state)
 
         # Get the latest goal map
         try:
@@ -247,14 +255,11 @@ class GreatArtist:
         self.bot.goal_queue.put(numpy.asarray(self.goal))
 
         # Drain the queue of incoming states from the bot control process
-        try:
-            while True:
-                prev_pos = self.bot.state.position
-                self.bot.state = self.bot.state_queue.get_nowait()
-                self.record_bot_travel(prev_pos, self.bot.state.position)
-                self.draw_debug_vibration_modes()
-        except queue.Empty:
-            pass
+        while self.bot.state_rx.poll():
+            prev_pos = self.bot.state.position
+            self.bot.state = self.bot.state_rx.recv()
+            self.record_bot_travel(prev_pos, self.bot.state.position)
+            self.draw_debug_vibration_modes()
 
         # Update the output images
         self.draw_debug_latest_position()
@@ -288,12 +293,14 @@ class GreatArtist:
             # Follow the bot with all available vectors
             self.draw_vibration_mode_line(mode, self.bot.state.position)
 
-        if current is not None:
+        # Trace current frame, along bottom of screen
+        w, h = self.debugview.size
+        frame_x = self.bot.state.frame_counter % w
+        self.debugview.paste(im=255, box=(frame_x, h-4, frame_x+1, h))
 
+        if current is not None:
             # Oscilloscope trace for current mode
-            x = self.bot.state.frame_counter % self.debugview.size[0]
-            y = current
-            self.debugview.paste(im=255, box=(x, y*4, x+1, (y+1)*4))
+            self.debugview.paste(im=255, box=(frame_x, current*4, frame_x+1, (current+1)*4))
 
             # Oscilloscope trace for vectors; X is time, Y is mode
             grid = ((0.004 * self.bot.state.frame_counter) % 1.0, (2+current) * 0.05)
@@ -322,8 +329,6 @@ class Motors:
         self.count = len(self.pins)
         for pin in self.pins:
             self.pi.set_PWM_frequency(pin, hz)
-        self.off()
-        atexit.register(self.off)
 
     def set(self, speeds):
         self.speeds = tuple(speeds)
@@ -365,7 +370,6 @@ class TabletTx:
 
     def __init__(self, pi):
         self.pi = pi
-        atexit.register(self.off)
 
     def set_pressure(self, p):
         self.set_hz(int(self.idle_hz + max(0.0, min(1.0, p)) * 9000))
@@ -395,7 +399,6 @@ class TabletRx:
                 self.dev = dev
                 print("Using device as tablet:", dev)
                 dev.grab()
-                atexit.register(dev.ungrab)
                 return
         raise IOError("Couldn't find the tablet (looking for an input device with X, Y, and Pressure)")
 
