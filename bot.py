@@ -24,11 +24,11 @@ class WiggleMode:
 class WiggleState:
     """Current state of the bot controller, saved on every timestep"""
 
-    def __init__(self, mode_pwm):
+    def __init__(self, mode_pwm, pwm_initial):
         self.timestamp = None
         self.position = None
         self.velocity = None
-        self.pwm_initial = 0
+        self.pwm_initial = pwm_initial
         self.current_mode = None
         self.last_mode = None
         self.mode_change_timestamp = 0
@@ -37,7 +37,7 @@ class WiggleState:
         self.dt_histogram = [0] * 20
 
     def __repr__(self):
-        return "<frame %06d, pos=%s, mode=%s pwmi=%.1f dthist=%s>" % (
+        return "<frame %06d, pos=%s, mode=%s pwmi=%.3f dthist=%s>" % (
             self.frame_counter, self.position, self.current_mode, self.pwm_initial, self.dt_histogram)
 
 
@@ -47,8 +47,9 @@ class WiggleBot:
        """
 
     minimum_speed = 1e-2
-    pwm_initial_increment = 1e-4
-    pwm_initial_decay = 1e-5
+    pwm_initial_startup = 0.2
+    pwm_initial_increment = 1e-5
+    pwm_initial_decay = 1e-6
     pwm_acceleration = 1.012
     ray_samples = 32
     ray_length = 0.7
@@ -58,6 +59,11 @@ class WiggleBot:
     ray_sample_exponent = 1.8
     mode_revisit_period = 20.0
     minimum_mode_duration = 0.4
+    mode_pwm = [
+        (1, 0, 0),
+        (0, 1, 0),
+        (0, 0, 1),
+    ]
 
     def __init__(self):
         self.goal = None
@@ -66,11 +72,7 @@ class WiggleBot:
         self.pi = pigpio.pi()
         self.tablet = TabletLoop(self.pi)
         self.motors = Motors(self.pi)
-        self.state = WiggleState([
-           (1, 0, 0),
-           (0, 1, 0),
-           (0, 0, 1),
-        ])
+        self.state = WiggleState(self.mode_pwm, self.pwm_initial_startup)
 
     def start(self):
         self.process = multiprocessing.Process(target=self._proc)
@@ -418,8 +420,10 @@ class TabletRx:
 
 
 class Display:
+    zoom = 2
+
     def start(self, size):
-        self.size = size
+        self.size = numpy.array(size)
         self.queue = multiprocessing.Queue(2)
         self.process = multiprocessing.Process(target=self._proc)
         self.process.start()
@@ -431,24 +435,29 @@ class Display:
             pass
 
     def _proc(self):
-        screen = pygame.display.set_mode(self.size)
+        screen = pygame.display.set_mode(self.size * self.zoom)
         pygame.display.set_caption('Wiggle Bot')
         while True:
             surf = pygame.image.fromstring(self.queue.get(), self.size, 'RGB')
-            screen.blit(surf, dest=(0,0))
+            pygame.transform.scale(surf.convert(screen), screen.get_size(), screen)
             pygame.display.update()
 
 
 class VideoEncoder:
-    def start(self, filename, size, fps=30, crf=15, zoom=2):
+    def start(self, filename, size, fps=30, crf=15, zoom=2, vid_size=(1280,720)):
         self.filename = filename
         self.fps = fps
         self.crf = crf
         self.size = size
-        filters = 'scale=%dx%d:flags=neighbor' % (size[0]*zoom, size[1]*zoom)
-        self.proc = subprocess.Popen(['ffmpeg', '-y', '-pix_fmt', 'rgb24', '-f', 'rawvideo',
+        vf_scale = 'scale=%dx%d:flags=neighbor' % (size[0]*zoom, size[1]*zoom)
+        vf_pad = 'pad=%d:%d:(ow-iw)/2:(oh-ih)/2' % vid_size
+        filters = (vf_scale, vf_pad)
+        self.proc = subprocess.Popen([
+            'ffmpeg', '-y', '-pix_fmt', 'rgb24', '-f', 'rawvideo',
             '-s', '%dx%d' % self.size, '-r', str(self.fps),
-            '-i', '-', '-crf', str(self.crf), '-vf', filters, self.filename], stdin=subprocess.PIPE)
+            '-i', '-', '-crf', str(self.crf),
+            '-vf', ','.join(filters), self.filename],
+            stdin=subprocess.PIPE)
 
     def encode(self, img):
         self.proc.stdin.write(img.tobytes())
