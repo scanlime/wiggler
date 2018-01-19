@@ -1,0 +1,4 @@
+spring metal: berillium bronze C17200, 0.2mm
+non-spring metal: brass, 0.2mm
+birch plywood, 3.6mm
+nuts and bolts M2
